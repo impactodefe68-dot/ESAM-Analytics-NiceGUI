@@ -1,5 +1,6 @@
 # ============================================================
-# ESAM Analytics 360° — main.py (versión completa, NiceGUI 4.x)
+# ESAM Analytics 360° — main.py
+# Compatible con NiceGUI 4.x / Python 3.12+
 # ============================================================
 import os
 import hashlib
@@ -9,14 +10,13 @@ from contextlib import contextmanager
 from urllib.parse import urlparse, parse_qs, urlunparse
 
 import asyncpg
-import pandas as pd
 import plotly.graph_objects as go
 from dotenv import load_dotenv
 from nicegui import app, ui
 
 load_dotenv()
 
-# ---------- CONFIG ----------
+# ---------------- CONFIG ----------------
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 STORAGE_SECRET = os.getenv("STORAGE_SECRET", "esam-secret-change-me")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
@@ -31,16 +31,16 @@ TASAS_DEFECTO = {
 }
 
 
-def ahora_local():
+def ahora_local() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=UTC_OFFSET)
 
 
-def hoy_local():
+def hoy_local() -> date:
     return ahora_local().date()
 
 
 def parsear_tiempo(v):
-    if v is None or pd.isna(v):
+    if v is None:
         return None
     t = str(v).strip()
     if not t or t.lower() in ("none", "nan", "", "null"):
@@ -78,13 +78,13 @@ def rango_quincena(f, num=None):
     return rango_quincena(f, 2)
 
 
-def hash_password(p):
+def hash_password(p: str) -> str:
     salt = os.urandom(16)
     d = hashlib.pbkdf2_hmac("sha256", p.encode(), salt, PBKDF2_ITER)
     return f"pbkdf2_sha256${PBKDF2_ITER}${salt.hex()}${d.hex()}"
 
 
-def verify_password(p, stored):
+def verify_password(p: str, stored: str) -> bool:
     if not stored:
         return False
     if stored.startswith("pbkdf2_sha256$"):
@@ -98,6 +98,7 @@ def verify_password(p, stored):
 
 
 def _dsn_and_ssl():
+    """Limpia la URL (quita channel_binding) y devuelve ssl='require'."""
     if not DATABASE_URL:
         return "", None
     try:
@@ -107,12 +108,12 @@ def _dsn_and_ssl():
         qs.pop("ssl", None)
         qs.pop("channel_binding", None)
         new_query = "&".join(f"{k}={v[0]}" for k, v in qs.items())
-        new_parsed = parsed._replace(query=new_query)
-        return urlunparse(new_parsed), "require"
+        return urlunparse(parsed._replace(query=new_query)), "require"
     except Exception:
         return DATABASE_URL, None
 
 
+# ---------------- BASE DE DATOS ----------------
 class DB:
     pool = None
 
@@ -120,14 +121,17 @@ class DB:
     async def connect(cls):
         dsn, ssl_mode = _dsn_and_ssl()
         if not dsn:
-            print("❌ DATABASE_URL no configurada")
+            print("❌ DATABASE_URL no configurada. La app arrancará sin BD.")
             return
         try:
             cls.pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, ssl=ssl_mode)
+            print("✅ Pool de conexiones creado")
             await cls._init_schema()
             print("✅ Base de datos conectada")
         except Exception as e:
             print(f"❌ Error conectando a BD: {e}")
+            import traceback
+            traceback.print_exc()
 
     @classmethod
     async def close(cls):
@@ -177,18 +181,30 @@ class DB:
             """)
             await c.execute("CREATE INDEX IF NOT EXISTS idx_partidos_uf ON partidos (usuario_id, fecha);")
             await c.execute("CREATE INDEX IF NOT EXISTS idx_picheos_uf ON picheos (usuario_id, fecha);")
+
             for k, v in TASAS_DEFECTO.items():
                 await c.execute(
                     "INSERT INTO configuracion_global (clave, valor) VALUES ($1, $2) ON CONFLICT (clave) DO NOTHING",
                     k, v,
                 )
-            await c.execute(
-                "INSERT INTO usuarios (username, nombre, password_hash, rol) VALUES ('admin','Administrador', $1, 'admin') ON CONFLICT (username) DO NOTHING",
-                hash_password(ADMIN_PASSWORD),
-            )
+
+            # Admin: crear si no existe, o actualizar hash si cambió ADMIN_PASSWORD
+            existing = await c.fetchrow("SELECT password_hash FROM usuarios WHERE username = 'admin'")
+            if not existing:
+                await c.execute(
+                    "INSERT INTO usuarios (username, nombre, password_hash, rol) VALUES ('admin','Administrador', $1, 'admin')",
+                    hash_password(ADMIN_PASSWORD),
+                )
+                print("✅ Usuario admin creado con ADMIN_PASSWORD")
+            elif not verify_password(ADMIN_PASSWORD, existing["password_hash"]):
+                await c.execute("UPDATE usuarios SET password_hash = $1 WHERE username = 'admin'",
+                                hash_password(ADMIN_PASSWORD))
+                print("🔄 Admin password sincronizado con ADMIN_PASSWORD")
 
     @classmethod
     async def authenticate(cls, username, password):
+        if not cls.pool:
+            return None
         async with cls.pool.acquire() as c:
             row = await c.fetchrow(
                 "SELECT id, username, nombre, rol, password_hash FROM usuarios WHERE username = $1",
@@ -203,6 +219,8 @@ class DB:
 
     @classmethod
     async def register(cls, username, nombre, password):
+        if not cls.pool:
+            return False, "❌ Sin conexión a BD"
         try:
             async with cls.pool.acquire() as c:
                 await c.execute(
@@ -271,8 +289,8 @@ class DB:
     async def get_partido(cls, pid):
         async with cls.pool.acquire() as c:
             return await c.fetchrow(
-                "SELECT id, usuario_id, codigo_partido, fecha, tiempo_ejecucion, tarifa, tipo_partido FROM partidos WHERE id = $1",
-                pid)
+                "SELECT id, usuario_id, codigo_partido, fecha, tiempo_ejecucion, tarifa, tipo_partido "
+                "FROM partidos WHERE id = $1", pid)
 
     @classmethod
     async def add_partido(cls, uid, codigo, fecha, tiempo, tarifa, tipo):
@@ -373,25 +391,12 @@ async def recalcular_quincena(uid, fecha_ref):
         await aplicar(uid)
 
 
-# ---------- MIDDLEWARE AUTH ----------
-class AuthMiddleware:
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        path = scope["path"]
-        if path in {"/login", "/favicon.ico"} or path.startswith("/_nicegui"):
-            await self.app(scope, receive, send)
-            return
-        if not app.storage.user.get("authenticated"):
-            from starlette.responses import RedirectResponse
-            resp = RedirectResponse(f"/login?redirect_to={path}")
-            await resp(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
+# ---------------- LAYOUT ----------------
+def check_auth() -> bool:
+    if not app.storage.user.get("authenticated"):
+        ui.navigate.to("/login")
+        return False
+    return True
 
 
 def logout():
@@ -417,9 +422,7 @@ def page_layout(title, active):
 
     with ui.header().classes("bg-slate-900 text-white"):
         with ui.row().classes("w-full items-center justify-between px-4"):
-            with ui.row().classes("items-center gap-2"):
-                ui.button(icon="menu", on_click=lambda: None).props("flat color=white")
-                ui.label(f"ESAM 360° · {title}").classes("text-lg font-bold")
+            ui.label(f"ESAM 360° · {title}").classes("text-lg font-bold")
             with ui.row().classes("items-center gap-3"):
                 ui.label(f"👤 {app.storage.user.get('nombre','')}").classes("text-sm text-slate-300")
                 ui.button("Salir", icon="logout", on_click=logout).props("flat color=white no-caps")
@@ -434,19 +437,20 @@ def get_uid():
     return app.storage.user.get("admin_target", app.storage.user["user_id"])
 
 
-async def user_selector():
+async def user_selector(current_path: str):
     if app.storage.user.get("rol") != "admin":
         return
     users = await DB.list_users()
     opts = {0: "🌐 GLOBAL (todos)"}
     for u in users:
         opts[u["id"]] = f"👤 {u['nombre']} (@{u['username']})"
-    sel = ui.select(opts, label="Ver datos de", value=app.storage.user.get("admin_target", 0)) \
+    sel = ui.select(opts, label="Ver datos de",
+                    value=app.storage.user.get("admin_target", 0)) \
         .classes("w-80").props("outlined dense")
 
     def on_change(e):
         app.storage.user.update(admin_target=e.value)
-        ui.navigate.to(ui.context.client.page.path)
+        ui.navigate.to(current_path)
 
     sel.on_value_change(on_change)
 
@@ -459,7 +463,7 @@ def login_page(redirect_to: str = "/"):
     if app.storage.user.get("authenticated"):
         ui.navigate.to("/")
         return
-    ui.add_head_html("<style>body{background:#0f172a;}</style>")
+    ui.add_head_html("<style>body{background:#0f172a !important;}</style>")
     with ui.card().classes("absolute-center w-96 p-8 shadow-2xl bg-slate-800 gap-3"):
         ui.label("🎯 ESAM Analytics 360°").classes("text-2xl font-bold text-white text-center")
         ui.label("CONTROL OPERATIVO").classes("text-xs text-slate-400 text-center mb-4 tracking-widest")
@@ -470,7 +474,8 @@ def login_page(redirect_to: str = "/"):
         with ui.tab_panels(tabs, value="Ingresar").classes("w-full bg-transparent"):
             with ui.tab_panel("Ingresar"):
                 u = ui.input("Usuario").props("outlined dark dense").classes("w-full")
-                p = ui.input("Contraseña", password=True, password_toggle_button=True).props("outlined dark dense").classes("w-full")
+                p = ui.input("Contraseña", password=True, password_toggle_button=True) \
+                    .props("outlined dark dense").classes("w-full")
 
                 async def do_login():
                     if not (u.value and p.value):
@@ -515,10 +520,13 @@ def login_page(redirect_to: str = "/"):
 # ============================================================
 @ui.page("/")
 async def dashboard():
+    if not check_auth():
+        return
     with page_layout("Dashboard", "/"):
-        await user_selector()
+        await user_selector("/")
         uid = get_uid()
-        period = ui.toggle(["Quincena Actual", "Quincena Anterior", "Este Mes"], value="Quincena Actual").props("dense")
+        period = ui.toggle(["Quincena Actual", "Quincena Anterior", "Este Mes"],
+                           value="Quincena Actual").props("dense")
         metrics_row = ui.row().classes("w-full gap-4 flex-wrap")
         chart_area = ui.column().classes("w-full")
 
@@ -593,11 +601,14 @@ async def dashboard():
 # ============================================================
 @ui.page("/basket")
 async def basket_page():
+    if not check_auth():
+        return
     with page_layout("Básquetbol", "/basket"):
-        await user_selector()
+        await user_selector("/basket")
         uid = get_uid()
         hoy = hoy_local()
-        period = ui.toggle(["Quincena Actual", "Quincena Anterior"], value="Quincena Actual").props("dense")
+        period = ui.toggle(["Quincena Actual", "Quincena Anterior"],
+                           value="Quincena Actual").props("dense")
 
         with ui.row().classes("w-full justify-between items-center"):
             title = ui.label("").classes("text-lg font-semibold")
@@ -633,7 +644,6 @@ async def basket_page():
                     {"name": "tiempo", "label": "Tiempo", "field": "tiempo", "align": "left"},
                     {"name": "tipo", "label": "Modalidad", "field": "tipo", "align": "left"},
                     {"name": "tarifa", "label": "Tarifa $", "field": "tarifa", "align": "right"},
-                    {"name": "acc", "label": "", "field": "acc", "align": "right"},
                 ]
                 if "operador" in partidos[0].keys():
                     cols.insert(1, {"name": "operador", "label": "Operador", "field": "operador", "align": "left"})
@@ -647,15 +657,27 @@ async def basket_page():
                     if "operador" in p.keys():
                         r["operador"] = p["operador"]
                     rows.append(r)
-                tbl = ui.table(columns=cols, rows=rows, row_key="id").classes("w-full").props("flat bordered dense")
-                tbl.add_slot("body-cell-acc", """
-                    <q-td :props="props">
-                        <q-btn icon="edit" flat dense color="primary" @click="$parent.$emit('edit_row', props.row.id)"/>
-                        <q-btn icon="delete" flat dense color="negative" @click="$parent.$emit('del_row', props.row.id)"/>
-                    </q-td>
-                """)
-                tbl.on("edit_row", lambda e: open_edit(e.args))
-                tbl.on("del_row", lambda e: ask_delete(e.args))
+                ui.table(columns=cols, rows=rows, row_key="id") \
+                    .classes("w-full").props("flat bordered dense")
+
+                # Acciones de edición / borrado
+                with ui.row().classes("w-full gap-4 items-center mt-2"):
+                    ids = [p["id"] for p in partidos]
+                    sel_edit = ui.select(ids, label="Editar ID").props("outlined dense").classes("w-32")
+                    btn_edit = ui.button("✏️ Editar").props("color=primary no-caps")
+                    sel_del = ui.select(ids, label="Eliminar ID").props("outlined dense").classes("w-32")
+                    btn_del = ui.button("🗑️ Eliminar").props("color=negative no-caps")
+
+                    async def on_edit():
+                        if sel_edit.value:
+                            await open_edit(sel_edit.value)
+
+                    async def on_del():
+                        if sel_del.value:
+                            await ask_delete(sel_del.value)
+
+                    btn_edit.on_click(on_edit)
+                    btn_del.on_click(on_del)
 
         async def ask_delete(pid):
             with ui.dialog() as d, ui.card():
@@ -678,19 +700,25 @@ async def basket_page():
                 return
             with ui.dialog() as d, ui.card().classes("w-96"):
                 ui.label(f"Editar #{pid}").classes("text-lg font-semibold")
-                f_ = ui.input("Fecha", value=p["fecha"].isoformat()).props("type=date outlined dense").classes("w-full")
-                c_ = ui.input("Código", value=p["codigo_partido"]).props("outlined dense").classes("w-full")
-                t_ = ui.input("Tiempo (HH:MM:SS)", value=p["tiempo_ejecucion"] or "").props("outlined dense").classes("w-full")
-                ta_ = ui.number("Tarifa $", value=float(p["tarifa"]), step=0.5).props("outlined dense").classes("w-full")
+                f_ = ui.input("Fecha", value=p["fecha"].isoformat()) \
+                    .props("type=date outlined dense").classes("w-full")
+                c_ = ui.input("Código", value=p["codigo_partido"]) \
+                    .props("outlined dense").classes("w-full")
+                t_ = ui.input("Tiempo (HH:MM:SS)", value=p["tiempo_ejecucion"] or "") \
+                    .props("outlined dense").classes("w-full")
+                ta_ = ui.number("Tarifa $", value=float(p["tarifa"]), step=0.5) \
+                    .props("outlined dense").classes("w-full")
 
                 async def save():
                     try:
                         nf = date.fromisoformat(f_.value)
                     except Exception:
-                        ui.notify("Fecha inválida", type="negative"); return
+                        ui.notify("Fecha inválida", type="negative")
+                        return
                     seg = parsear_tiempo(t_.value) if t_.value else None
                     if t_.value and seg is None:
-                        ui.notify("Tiempo inválido", type="negative"); return
+                        ui.notify("Tiempo inválido", type="negative")
+                        return
                     await DB.update_partido(pid, nf, c_.value, formatear_tiempo(seg), float(ta_.value))
                     d.close()
                     await refresh()
@@ -705,25 +733,33 @@ async def basket_page():
             tasas = await DB.get_tasas()
             with ui.dialog() as d, ui.card().classes("w-96"):
                 ui.label("Nuevo Partido").classes("text-lg font-semibold")
-                f_ = ui.input("Fecha", value=hoy.isoformat()).props("type=date outlined dense").classes("w-full")
+                f_ = ui.input("Fecha", value=hoy.isoformat()) \
+                    .props("type=date outlined dense").classes("w-full")
                 c_ = ui.input("Código").props("outlined dense").classes("w-full")
                 t_ = ui.input("Tiempo (HH:MM:SS)").props("outlined dense").classes("w-full")
                 tipo = ui.select(
-                    {"quincenal": "🏀 Quincenal", "en_vivo_normal": "⚡ En Vivo Normal", "en_vivo_nba": "🔥 En Vivo NBA"},
+                    {"quincenal": "🏀 Quincenal",
+                     "en_vivo_normal": "⚡ En Vivo Normal",
+                     "en_vivo_nba": "🔥 En Vivo NBA"},
                     label="Modalidad", value="quincenal",
                 ).props("outlined dense").classes("w-full")
 
                 async def save():
                     if not c_.value:
-                        ui.notify("Falta código", type="warning"); return
+                        ui.notify("Falta código", type="warning")
+                        return
                     try:
                         nf = date.fromisoformat(f_.value)
                     except Exception:
-                        ui.notify("Fecha inválida", type="negative"); return
+                        ui.notify("Fecha inválida", type="negative")
+                        return
                     seg = parsear_tiempo(t_.value) if t_.value else None
                     if t_.value and seg is None:
-                        ui.notify("Tiempo inválido", type="negative"); return
-                    tarifa_map = {"quincenal": tasas["tramo_1"], "en_vivo_normal": tasas["en_vivo_normal"], "en_vivo_nba": tasas["en_vivo_nba"]}
+                        ui.notify("Tiempo inválido", type="negative")
+                        return
+                    tarifa_map = {"quincenal": tasas["tramo_1"],
+                                  "en_vivo_normal": tasas["en_vivo_normal"],
+                                  "en_vivo_nba": tasas["en_vivo_nba"]}
                     await DB.add_partido(app.storage.user["user_id"], c_.value.strip(), nf,
                                          formatear_tiempo(seg), tarifa_map[tipo.value], tipo.value)
                     d.close()
@@ -745,11 +781,14 @@ async def basket_page():
 # ============================================================
 @ui.page("/beisbol")
 async def beisbol_page():
+    if not check_auth():
+        return
     with page_layout("Béisbol", "/beisbol"):
-        await user_selector()
+        await user_selector("/beisbol")
         uid = get_uid()
         hoy = hoy_local()
-        period = ui.toggle(["Quincena Actual", "Quincena Anterior"], value="Quincena Actual").props("dense")
+        period = ui.toggle(["Quincena Actual", "Quincena Anterior"],
+                           value="Quincena Actual").props("dense")
 
         with ui.row().classes("w-full justify-between items-center"):
             title = ui.label("").classes("text-lg font-semibold")
@@ -784,7 +823,6 @@ async def beisbol_page():
                     {"name": "fecha", "label": "Fecha", "field": "fecha", "align": "left"},
                     {"name": "control", "label": "ID Control", "field": "control", "align": "left"},
                     {"name": "cantidad", "label": "Cantidad", "field": "cantidad", "align": "right"},
-                    {"name": "acc", "label": "", "field": "acc", "align": "right"},
                 ]
                 if "operador" in picheos[0].keys():
                     cols.insert(1, {"name": "operador", "label": "Operador", "field": "operador", "align": "left"})
@@ -795,15 +833,26 @@ async def beisbol_page():
                     if "operador" in p.keys():
                         r["operador"] = p["operador"]
                     rows.append(r)
-                tbl = ui.table(columns=cols, rows=rows, row_key="id").classes("w-full").props("flat bordered dense")
-                tbl.add_slot("body-cell-acc", """
-                    <q-td :props="props">
-                        <q-btn icon="edit" flat dense color="primary" @click="$parent.$emit('edit_row', props.row.id)"/>
-                        <q-btn icon="delete" flat dense color="negative" @click="$parent.$emit('del_row', props.row.id)"/>
-                    </q-td>
-                """)
-                tbl.on("edit_row", lambda e: open_edit(e.args))
-                tbl.on("del_row", lambda e: ask_delete(e.args))
+                ui.table(columns=cols, rows=rows, row_key="id") \
+                    .classes("w-full").props("flat bordered dense")
+
+                with ui.row().classes("w-full gap-4 items-center mt-2"):
+                    ids = [p["id"] for p in picheos]
+                    sel_edit = ui.select(ids, label="Editar ID").props("outlined dense").classes("w-32")
+                    btn_edit = ui.button("✏️ Editar").props("color=primary no-caps")
+                    sel_del = ui.select(ids, label="Eliminar ID").props("outlined dense").classes("w-32")
+                    btn_del = ui.button("🗑️ Eliminar").props("color=negative no-caps")
+
+                    async def on_edit():
+                        if sel_edit.value:
+                            await open_edit(sel_edit.value)
+
+                    async def on_del():
+                        if sel_del.value:
+                            await ask_delete(sel_del.value)
+
+                    btn_edit.on_click(on_edit)
+                    btn_del.on_click(on_del)
 
         async def ask_delete(pid):
             with ui.dialog() as d, ui.card():
@@ -827,15 +876,19 @@ async def beisbol_page():
                 return
             with ui.dialog() as d, ui.card().classes("w-96"):
                 ui.label(f"Editar #{pid}").classes("text-lg font-semibold")
-                f_ = ui.input("Fecha", value=p["fecha"].isoformat()).props("type=date outlined dense").classes("w-full")
-                c_ = ui.input("ID Control", value=p["id_control"]).props("outlined dense").classes("w-full")
-                n_ = ui.number("Cantidad", value=int(p["cantidad"]), step=1).props("outlined dense").classes("w-full")
+                f_ = ui.input("Fecha", value=p["fecha"].isoformat()) \
+                    .props("type=date outlined dense").classes("w-full")
+                c_ = ui.input("ID Control", value=p["id_control"]) \
+                    .props("outlined dense").classes("w-full")
+                n_ = ui.number("Cantidad", value=int(p["cantidad"]), step=1) \
+                    .props("outlined dense").classes("w-full")
 
                 async def save():
                     try:
                         nf = date.fromisoformat(f_.value)
                     except Exception:
-                        ui.notify("Fecha inválida", type="negative"); return
+                        ui.notify("Fecha inválida", type="negative")
+                        return
                     await DB.update_picheos(pid, nf, c_.value, int(n_.value))
                     d.close()
                     await refresh()
@@ -849,17 +902,21 @@ async def beisbol_page():
         async def open_add():
             with ui.dialog() as d, ui.card().classes("w-96"):
                 ui.label("Nuevo Lote").classes("text-lg font-semibold")
-                f_ = ui.input("Fecha", value=hoy.isoformat()).props("type=date outlined dense").classes("w-full")
+                f_ = ui.input("Fecha", value=hoy.isoformat()) \
+                    .props("type=date outlined dense").classes("w-full")
                 c_ = ui.input("ID Control").props("outlined dense").classes("w-full")
-                n_ = ui.number("Cantidad", value=100, step=1).props("outlined dense").classes("w-full")
+                n_ = ui.number("Cantidad", value=100, step=1) \
+                    .props("outlined dense").classes("w-full")
 
                 async def save():
                     if not c_.value:
-                        ui.notify("Falta ID", type="warning"); return
+                        ui.notify("Falta ID", type="warning")
+                        return
                     try:
                         nf = date.fromisoformat(f_.value)
                     except Exception:
-                        ui.notify("Fecha inválida", type="negative"); return
+                        ui.notify("Fecha inválida", type="negative")
+                        return
                     await DB.add_picheos(app.storage.user["user_id"], nf, c_.value.strip(), int(n_.value))
                     d.close()
                     await refresh()
@@ -880,38 +937,52 @@ async def beisbol_page():
 # ============================================================
 @ui.page("/admin")
 async def admin_page():
+    if not check_auth():
+        return
     if app.storage.user.get("rol") != "admin":
+        ui.notify("Solo administradores", type="negative")
         ui.navigate.to("/")
         return
     with page_layout("Administración", "/admin"):
         ui.label("⚙️ Configuración de Tarifas").classes("text-xl font-bold")
-        ui.label("Los cambios se aplican retroactivamente al recalcular quincenas.").classes("text-sm text-gray-500")
+        ui.label("Los cambios se aplican al recalcular quincenas.").classes("text-sm text-gray-500")
         tasas = await DB.get_tasas()
 
         with ui.card().classes("w-full"):
             ui.label("🏀 Básquetbol — Tramos").classes("font-semibold mb-2")
             with ui.row().classes("w-full gap-4 flex-wrap"):
-                t1 = ui.number("Tramo 1 (1–11)", value=tasas["tramo_1"], step=0.25).classes("flex-1 min-w-[140px]").props("outlined dense")
-                t2 = ui.number("Tramo 2 (12–14)", value=tasas["tramo_2"], step=0.25).classes("flex-1 min-w-[140px]").props("outlined dense")
-                t3 = ui.number("Tramo 3 (15–26)", value=tasas["tramo_3"], step=0.25).classes("flex-1 min-w-[140px]").props("outlined dense")
-                t4 = ui.number("Tramo 4 (27–29)", value=tasas["tramo_4"], step=0.25).classes("flex-1 min-w-[140px]").props("outlined dense")
-                t5 = ui.number("Tramo 5 (30+)", value=tasas["tramo_5"], step=0.25).classes("flex-1 min-w-[140px]").props("outlined dense")
+                t1 = ui.number("Tramo 1 (1–11)", value=tasas["tramo_1"], step=0.25) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
+                t2 = ui.number("Tramo 2 (12–14)", value=tasas["tramo_2"], step=0.25) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
+                t3 = ui.number("Tramo 3 (15–26)", value=tasas["tramo_3"], step=0.25) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
+                t4 = ui.number("Tramo 4 (27–29)", value=tasas["tramo_4"], step=0.25) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
+                t5 = ui.number("Tramo 5 (30+)", value=tasas["tramo_5"], step=0.25) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
             ui.label("⚡ En Vivo").classes("font-semibold mt-4 mb-2")
             with ui.row().classes("w-full gap-4 flex-wrap"):
-                vn = ui.number("Normal ($)", value=tasas["en_vivo_normal"], step=0.5).classes("flex-1 min-w-[140px]").props("outlined dense")
-                vna = ui.number("NBA ($)", value=tasas["en_vivo_nba"], step=0.5).classes("flex-1 min-w-[140px]").props("outlined dense")
+                vn = ui.number("Normal ($)", value=tasas["en_vivo_normal"], step=0.5) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
+                vna = ui.number("NBA ($)", value=tasas["en_vivo_nba"], step=0.5) \
+                    .classes("flex-1 min-w-[140px]").props("outlined dense")
             ui.label("⚾ Béisbol").classes("font-semibold mt-4 mb-2")
-            pb = ui.number("Precio por picheo ($)", value=tasas["precio_beisbol"], format="%.4f", step=0.001).classes("w-64").props("outlined dense")
+            pb = ui.number("Precio por picheo ($)", value=tasas["precio_beisbol"],
+                           format="%.4f", step=0.001) \
+                .classes("w-64").props("outlined dense")
 
             async def save():
-                for k, v in [("tasa_tramo_1", t1.value), ("tasa_tramo_2", t2.value), ("tasa_tramo_3", t3.value),
-                             ("tasa_tramo_4", t4.value), ("tasa_tramo_5", t5.value),
+                for k, v in [("tasa_tramo_1", t1.value), ("tasa_tramo_2", t2.value),
+                             ("tasa_tramo_3", t3.value), ("tasa_tramo_4", t4.value),
+                             ("tasa_tramo_5", t5.value),
                              ("tasa_en_vivo_normal", vn.value), ("tasa_en_vivo_nba", vna.value),
                              ("precio_beisbol", pb.value)]:
                     await DB.set_tasa(k, v)
                 ui.notify("✅ Tarifas actualizadas", type="positive")
 
-            ui.button("💾 Guardar Cambios", on_click=save).classes("mt-4").props("color=primary no-caps")
+            ui.button("💾 Guardar Cambios", on_click=save) \
+                .classes("mt-4").props("color=primary no-caps")
 
 
 # ============================================================
@@ -919,6 +990,8 @@ async def admin_page():
 # ============================================================
 @ui.page("/security")
 async def security_page():
+    if not check_auth():
+        return
     with page_layout("Seguridad", "/security"):
         ui.label("🔐 Seguridad").classes("text-xl font-bold")
         with ui.card().classes("w-full max-w-md"):
@@ -927,19 +1000,26 @@ async def security_page():
                 ui.label("Cambiar contraseña de usuario").classes("font-semibold mb-2")
                 users = await DB.list_users()
                 opts = {u["id"]: f"{u['nombre']} (@{u['username']})" for u in users}
-                user_sel = ui.select(opts, label="Usuario", value=app.storage.user["user_id"]).props("outlined dense").classes("w-full")
+                user_sel = ui.select(opts, label="Usuario",
+                                     value=app.storage.user["user_id"]) \
+                    .props("outlined dense").classes("w-full")
             else:
                 ui.label("Cambiar mi contraseña").classes("font-semibold mb-2")
-            p1 = ui.input("Nueva contraseña", password=True).props("outlined dense").classes("w-full")
-            p2 = ui.input("Confirmar", password=True).props("outlined dense").classes("w-full")
+            p1 = ui.input("Nueva contraseña", password=True) \
+                .props("outlined dense").classes("w-full")
+            p2 = ui.input("Confirmar", password=True) \
+                .props("outlined dense").classes("w-full")
 
             async def do_change():
                 if not (p1.value and p2.value):
-                    ui.notify("Completa ambos", type="warning"); return
+                    ui.notify("Completa ambos", type="warning")
+                    return
                 if p1.value != p2.value:
-                    ui.notify("No coinciden", type="negative"); return
+                    ui.notify("No coinciden", type="negative")
+                    return
                 if len(p1.value) < 6:
-                    ui.notify("Mínimo 6 caracteres", type="warning"); return
+                    ui.notify("Mínimo 6 caracteres", type="warning")
+                    return
                 target = user_sel.value if user_sel else app.storage.user["user_id"]
                 ok, msg = await DB.change_password(target, p1.value)
                 ui.notify(msg, type="positive" if ok else "negative")
@@ -947,15 +1027,13 @@ async def security_page():
                     p1.value = ""
                     p2.value = ""
 
-            ui.button("Actualizar", on_click=do_change).classes("mt-2").props("color=primary no-caps")
+            ui.button("Actualizar", on_click=do_change) \
+                .classes("mt-2").props("color=primary no-caps")
 
 
 # ============================================================
 # ARRANQUE
 # ============================================================
-app.add_middleware(AuthMiddleware)
-
-
 @app.on_startup
 async def _start():
     await DB.connect()
@@ -974,4 +1052,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         storage_secret=STORAGE_SECRET,
         reload=False,
         favicon="🎯",
+        show=False,
     )
