@@ -1,4 +1,4 @@
-nicegui>=4.0.0
-asyncpg>=0.29.0
-python-dotenv>=1.0.0
-plotly>=5.18.0
+nicegui
+asyncpg
+plotly
+python-dotenv
