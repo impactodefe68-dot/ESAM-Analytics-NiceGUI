@@ -5,8 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 
 WORKDIR /app
 
+# Instala las dependencias en el entorno virtual de NiceGUI (sin --system)
 COPY requirements.txt .
-RUN uv pip install --system --no-cache -r requirements.txt
+RUN uv pip install --no-cache -r requirements.txt
 
 COPY . .
 
