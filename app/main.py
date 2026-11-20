@@ -45,22 +45,31 @@ def _cargar_psycopg2():
         from psycopg2.extras import RealDictCursor
         return psycopg2, RealDictCursor
     except ImportError:
-        print("[ESAM] psycopg2 no está instalado; intentando instalar psycopg2-binary…")
-        import subprocess
-        import sys
+        pass
 
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                "--quiet", "--no-cache-dir", "psycopg2-binary>=2.9.10",
-            ])
-        except Exception as e:
-            print(f"[ESAM] No se pudo instalar psycopg2-binary automáticamente: {e}")
-            print("[ESAM] Agrega 'psycopg2-binary>=2.9.10' al requirements.txt del despliegue.")
-            raise
+    print("[ESAM] psycopg2 no está instalado; intentando instalar psycopg2-binary…")
+    import subprocess
+    import sys
+
+    for paquete in ("psycopg2-binary==2.9.13", "psycopg2-binary"):
+        cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", paquete]
+        resultado = subprocess.run(cmd, capture_output=True, text=True)
+        if resultado.returncode == 0:
+            print(f"[ESAM] Instalado {paquete} correctamente.")
+            break
+        print(f"[ESAM] pip falló al instalar {paquete} (código {resultado.returncode}).")
+        detalle = ((resultado.stderr or "") + (resultado.stdout or "")).strip().splitlines()
+        for linea in detalle[-15:]:
+            print("[ESAM][pip]", linea)
+
+    try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
         return psycopg2, RealDictCursor
+    except ImportError:
+        print("[ESAM] Sin psycopg2. Agrega esta línea al requirements.txt que lee el despliegue:")
+        print("[ESAM]     psycopg2-binary==2.9.13")
+        raise RuntimeError("psycopg2 no disponible en el entorno")
 
 
 psycopg2, RealDictCursor = _cargar_psycopg2()
@@ -2498,7 +2507,7 @@ def _vista_seguridad(usuario, estado, refrescar):
 def pagina_principal():
     ui.dark_mode(True)  # la interfaz es oscura por diseño, no depende del tema del sistema
     ui.add_head_html('<meta name="theme-color" content="#070C16">')
-    ui.add_head_html(ESTILOS)
+    ui.add_head_html(f"<style>{ESTILOS}</style>")
     usuario = app.storage.user.get("usuario")
     if not usuario:
         _vista_acceso()
