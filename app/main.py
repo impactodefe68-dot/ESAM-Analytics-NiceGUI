@@ -35,9 +35,35 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import pandas as pd
-import psycopg2
 from nicegui import app, ui
-from psycopg2.extras import RealDictCursor
+
+
+def _cargar_psycopg2():
+    """Importa psycopg2; si el entorno de despliegue no lo trae, lo instala al arrancar."""
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        return psycopg2, RealDictCursor
+    except ImportError:
+        print("[ESAM] psycopg2 no está instalado; intentando instalar psycopg2-binary…")
+        import subprocess
+        import sys
+
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "--quiet", "--no-cache-dir", "psycopg2-binary>=2.9.10",
+            ])
+        except Exception as e:
+            print(f"[ESAM] No se pudo instalar psycopg2-binary automáticamente: {e}")
+            print("[ESAM] Agrega 'psycopg2-binary>=2.9.10' al requirements.txt del despliegue.")
+            raise
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        return psycopg2, RealDictCursor
+
+
+psycopg2, RealDictCursor = _cargar_psycopg2()
 
 # =========================================================
 # 0. ZONA HORARIA LOCAL (EL SERVIDOR TRABAJA EN UTC)
