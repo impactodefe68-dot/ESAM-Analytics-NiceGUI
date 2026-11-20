@@ -1,4 +1,4 @@
 nicegui
-asyncpg
+asyncpg>=0.30.0
 plotly
 python-dotenv
