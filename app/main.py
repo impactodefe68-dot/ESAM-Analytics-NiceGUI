@@ -326,6 +326,13 @@ def init_db():
             );
         """)
 
+        # Conserva los datos históricos si ya hay duplicados; la aplicación
+        # igualmente impide nuevas cargas duplicadas dentro de una transacción.
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_partidos_codigo_normalizado ON partidos (btrim(codigo_partido));")
+        except psycopg2.errors.UniqueViolation:
+            print("[ESAM] Hay códigos de partido duplicados históricos. Revísalos antes de crear el índice único; no se eliminó ningún registro.")
+
         cur.execute("CREATE INDEX IF NOT EXISTS idx_partidos_usuario_fecha ON partidos (usuario_id, fecha);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_partidos_fecha ON partidos (fecha);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_picheos_usuario_fecha ON picheos (usuario_id, fecha);")
@@ -388,6 +395,16 @@ def init_db():
         except Exception:
             pass
         cerrar_conexion(conn)
+
+
+def codigo_partido_ya_existe(cur, codigo, excluir_id=None):
+    """Serializa escrituras desde esta app y busca el código en todos los usuarios."""
+    cur.execute("SELECT pg_advisory_xact_lock(1163084109);")
+    cur.execute(
+        "SELECT 1 FROM partidos WHERE btrim(codigo_partido) = %s AND (%s::integer IS NULL OR id <> %s) LIMIT 1;",
+        (codigo, excluir_id, excluir_id),
+    )
+    return cur.fetchone() is not None
 
 
 # =========================================================
@@ -796,10 +813,10 @@ html, body { background: #04060A !important; color-scheme: dark; }
     --text: #F3F7FF;
     --text-soft: #C4D0E2;
     --muted: #8695AE;
-    --accent: #2F6BFF;
-    --accent-2: #00C8FF;
+    --accent: #315CFF;
+    --accent-2: #6684FF;
     --accent-dark: #1B4FE0;
-    --glow: rgba(47, 107, 255, .45);
+    --glow: rgba(49, 92, 255, .45);
     --success: #00D68F;
     --danger: #FF5470;
     --warning: #FFB020;
@@ -817,8 +834,8 @@ body, .q-page-container, .nicegui-content {
 
 body {
     background:
-        radial-gradient(900px 480px at 12% -10%, rgba(47, 107, 255, .22), transparent 62%),
-        radial-gradient(760px 420px at 92% 0%, rgba(0, 200, 255, .14), transparent 60%),
+        radial-gradient(900px 480px at 12% -10%, rgba(49, 92, 255, .22), transparent 62%),
+        radial-gradient(760px 420px at 92% 0%, rgba(102, 132, 255, .14), transparent 60%),
         var(--bg) !important;
 }
 
@@ -827,13 +844,13 @@ body {
 .q-page, .q-layout, .q-drawer, .q-header { background: transparent !important; color: var(--text) !important; }
 .q-card, .q-dialog__inner > .q-card { background: var(--surface) !important; color: var(--text) !important; }
 .q-tab-panel { background: transparent !important; padding: .55rem 0 0 !important; }
-::selection { background: rgba(47, 107, 255, .45); color: #FFFFFF; }
+::selection { background: rgba(49, 92, 255, .45); color: #FFFFFF; }
 
 /* ---------- Cabecera ---------- */
 .app-header {
     background: rgba(4, 6, 10, .86) !important;
     backdrop-filter: blur(14px);
-    border-bottom: 1px solid rgba(47, 107, 255, .22) !important;
+    border-bottom: 1px solid rgba(49, 92, 255, .22) !important;
     padding: .6rem 1.5rem !important;
     align-items: center;
 }
@@ -847,7 +864,7 @@ body {
 .app-brand::before {
     content: ''; width: 30px; height: 30px; border-radius: 9px;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    box-shadow: 0 0 0 1px rgba(0, 200, 255, .35), 0 8px 22px -8px var(--glow);
+    box-shadow: 0 0 0 1px rgba(102, 132, 255, .35), 0 8px 22px -8px var(--glow);
 }
 
 .app-brand span { color: var(--accent-2); }
@@ -869,15 +886,15 @@ body {
 }
 
 .menu-item:hover {
-    background: rgba(47, 107, 255, .12) !important;
+    background: rgba(49, 92, 255, .12) !important;
     color: #FFFFFF !important;
-    border-color: rgba(47, 107, 255, .28);
+    border-color: rgba(49, 92, 255, .28);
 }
 
 .menu-item.activo {
-    background: linear-gradient(90deg, rgba(47, 107, 255, .38), rgba(0, 200, 255, .10)) !important;
+    background: linear-gradient(90deg, rgba(49, 92, 255, .38), rgba(102, 132, 255, .10)) !important;
     color: #FFFFFF !important;
-    border-color: rgba(47, 107, 255, .55);
+    border-color: rgba(49, 92, 255, .55);
     box-shadow: inset 3px 0 0 var(--accent-2), 0 10px 26px -18px var(--glow);
 }
 
@@ -914,8 +931,8 @@ body {
 }
 
 .tarjeta:hover {
-    border-color: rgba(47, 107, 255, .45);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 24px 50px -32px rgba(47, 107, 255, .55);
+    border-color: rgba(49, 92, 255, .45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 24px 50px -32px rgba(49, 92, 255, .55);
 }
 
 .tarjeta-tabla { padding: .45rem .55rem; }
@@ -925,10 +942,10 @@ body {
 .metrica::after {
     content: ''; position: absolute; inset: 0 0 auto 0; height: 3px;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    box-shadow: 0 0 16px rgba(0, 200, 255, .55);
+    box-shadow: 0 0 16px rgba(102, 132, 255, .55);
 }
 
-.grid > .metrica:nth-child(2)::after { background: linear-gradient(90deg, #00C8FF, #6FE7FF); box-shadow: 0 0 16px rgba(0, 200, 255, .6); }
+.grid > .metrica:nth-child(2)::after { background: linear-gradient(90deg, #6684FF, #A9BAFF); box-shadow: 0 0 16px rgba(102, 132, 255, .6); }
 .grid > .metrica:nth-child(3)::after { background: linear-gradient(90deg, #00D68F, #6BFFCB); box-shadow: 0 0 16px rgba(0, 214, 143, .5); }
 .grid > .metrica:nth-child(4)::after { background: linear-gradient(90deg, #A78BFA, #7C5CFF); box-shadow: 0 0 16px rgba(124, 92, 255, .5); }
 .grid > .metrica:nth-child(5)::after { background: linear-gradient(90deg, #FFB020, #FFD772); box-shadow: 0 0 16px rgba(255, 176, 32, .45); }
@@ -943,7 +960,7 @@ body {
     font-size: clamp(1.12rem, 1.8vw, 1.5rem); font-weight: 800;
     letter-spacing: -.03em; color: #FFFFFF; line-height: 1.16;
     white-space: normal; overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
-    text-shadow: 0 0 24px rgba(47, 107, 255, .35);
+    text-shadow: 0 0 24px rgba(49, 92, 255, .35);
 }
 
 .metrica-pie { font-size: .715rem; color: #8496B0; line-height: 1.35; }
@@ -956,7 +973,7 @@ body {
 
 .q-field--outlined .q-field__control:before { border-color: var(--border) !important; }
 .q-field--outlined.q-field--focused .q-field__control:after { border-color: var(--accent-2) !important; }
-.q-field--outlined.q-field--focused .q-field__control { box-shadow: 0 0 0 3px rgba(47, 107, 255, .22); }
+.q-field--outlined.q-field--focused .q-field__control { box-shadow: 0 0 0 3px rgba(49, 92, 255, .22); }
 
 .q-field__native, .q-field__input, .q-field__prefix, .q-field__suffix { color: var(--text) !important; }
 .q-field__native::placeholder, .q-field__input::placeholder { color: #6E809A !important; opacity: 1; }
@@ -983,23 +1000,23 @@ body {
 .q-btn { border-radius: var(--radio-sm); transition: transform .14s ease, filter .14s ease, box-shadow .14s ease, background .14s ease; }
 
 .btn-primario {
-    background: linear-gradient(135deg, #3D7BFF 0%, #00C8FF 100%) !important;
+    background: linear-gradient(135deg, #315CFF 0%, #6684FF 100%) !important;
     color: #00121F !important;
-    border: 1px solid rgba(0, 200, 255, .55) !important;
-    box-shadow: 0 10px 26px -12px rgba(0, 200, 255, .85), inset 0 1px 0 rgba(255, 255, 255, .35) !important;
+    border: 1px solid rgba(102, 132, 255, .55) !important;
+    box-shadow: 0 10px 26px -12px rgba(102, 132, 255, .85), inset 0 1px 0 rgba(255, 255, 255, .35) !important;
 }
 
-.btn-primario:hover { filter: brightness(1.12) saturate(1.15); transform: translateY(-1px); box-shadow: 0 14px 34px -12px rgba(0, 200, 255, 1) !important; }
+.btn-primario:hover { filter: brightness(1.12) saturate(1.15); transform: translateY(-1px); box-shadow: 0 14px 34px -12px rgba(102, 132, 255, 1) !important; }
 .btn-primario:hover .q-focus-helper { opacity: 0 !important; }
 
-.btn-suave { color: #BFD2EE !important; border: 1px solid rgba(47, 107, 255, .35) !important; background: rgba(47, 107, 255, .08) !important; }
-.btn-suave:hover { background: rgba(47, 107, 255, .20) !important; color: #FFFFFF !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(47, 107, 255, .16); }
+.btn-suave { color: #BFD2EE !important; border: 1px solid rgba(49, 92, 255, .35) !important; background: rgba(49, 92, 255, .08) !important; }
+.btn-suave:hover { background: rgba(49, 92, 255, .20) !important; color: #FFFFFF !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(49, 92, 255, .16); }
 
 .btn-peligro { color: #FFB3BE !important; background: rgba(255, 84, 112, .12) !important; border: 1px solid rgba(255, 84, 112, .55) !important; }
 .btn-peligro:hover { background: rgba(255, 84, 112, .24) !important; box-shadow: 0 0 0 3px rgba(255, 84, 112, .16); }
 
 .btn-descarga { background: #070B12 !important; border: 1px solid var(--border) !important; color: #AFC0D8 !important; }
-.btn-descarga:hover { border-color: var(--accent-2) !important; color: #FFFFFF !important; background: #0B1424 !important; box-shadow: 0 0 0 3px rgba(0, 200, 255, .14); }
+.btn-descarga:hover { border-color: var(--accent-2) !important; color: #FFFFFF !important; background: #0B1424 !important; box-shadow: 0 0 0 3px rgba(102, 132, 255, .14); }
 
 /* ---------- Tablas ---------- */
 .q-table__container { background: transparent !important; border-radius: 14px !important; overflow: hidden; }
@@ -1017,15 +1034,15 @@ body {
     border-bottom: 1px solid #131B28 !important; font-variant-numeric: tabular-nums;
 }
 
-.q-table tbody tr:hover { background: rgba(47, 107, 255, .10) !important; }
+.q-table tbody tr:hover { background: rgba(49, 92, 255, .10) !important; }
 .q-table tbody tr:last-child td { border-bottom: none !important; }
 .q-table__bottom { color: #7E90AB !important; background: transparent !important; }
 
 /* ---------- Pestañas ---------- */
 .q-tabs { border-bottom: 1px solid var(--border-soft); }
 .q-tab { color: #8FA1BC !important; text-transform: none !important; font-weight: 700; font-size: .85rem; min-height: 42px; padding: 0 .95rem; }
-.q-tab--active { color: #FFFFFF !important; text-shadow: 0 0 20px rgba(0, 200, 255, .55); }
-.q-tab__indicator { background: linear-gradient(90deg, var(--accent), var(--accent-2)) !important; height: 3px !important; box-shadow: 0 0 12px rgba(0, 200, 255, .7); }
+.q-tab--active { color: #FFFFFF !important; text-shadow: 0 0 20px rgba(102, 132, 255, .55); }
+.q-tab__indicator { background: linear-gradient(90deg, var(--accent), var(--accent-2)) !important; height: 3px !important; box-shadow: 0 0 12px rgba(102, 132, 255, .7); }
 
 /* ---------- Expansiones ---------- */
 .q-expansion-item {
@@ -1047,7 +1064,7 @@ body {
 .q-notification--positive { border-color: rgba(0, 214, 143, .6) !important; }
 .q-notification--negative { border-color: rgba(255, 84, 112, .6) !important; }
 
-.separador { height: 1px; width: 100%; margin: .45rem 0; background: linear-gradient(90deg, rgba(47, 107, 255, .55), rgba(47, 107, 255, .05)); }
+.separador { height: 1px; width: 100%; margin: .45rem 0; background: linear-gradient(90deg, rgba(49, 92, 255, .55), rgba(49, 92, 255, .05)); }
 
 /* ---------- Acceso ---------- */
 .login-wrap { width: 100%; max-width: 470px; margin: 6vh auto 0; }
@@ -1055,9 +1072,9 @@ body {
 .login-brand-icon {
     width: 58px; height: 58px; margin: 0 auto .85rem; border-radius: 18px;
     display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(135deg, #2F6BFF, #00C8FF);
+    background: linear-gradient(135deg, #315CFF, #6684FF);
     color: #04101C; font-size: 1rem; font-weight: 900; letter-spacing: -.05em;
-    box-shadow: 0 0 0 1px rgba(0, 200, 255, .45), 0 16px 40px -14px rgba(0, 200, 255, .95);
+    box-shadow: 0 0 0 1px rgba(102, 132, 255, .45), 0 16px 40px -14px rgba(102, 132, 255, .95);
 }
 
 .login-name {
@@ -1071,23 +1088,43 @@ body {
 
 .login-line {
     width: 108px; height: 3px; margin: .9rem auto 1.1rem; border-radius: 4px;
-    background: linear-gradient(90deg, #2F6BFF, #00C8FF);
-    box-shadow: 0 0 16px rgba(0, 200, 255, .7);
+    background: linear-gradient(90deg, #315CFF, #6684FF);
+    box-shadow: 0 0 16px rgba(102, 132, 255, .7);
 }
 
 .panel-acceso {
     background: linear-gradient(168deg, rgba(12, 18, 29, .96), rgba(4, 6, 10, .98));
     border: 1px solid var(--border);
     border-radius: 22px; padding: 1.3rem 1.45rem 1.5rem; width: 100%;
-    box-shadow: 0 40px 90px -46px rgba(0, 0, 0, 1), 0 0 0 1px rgba(47, 107, 255, .10), inset 0 1px 0 rgba(255, 255, 255, .06);
+    box-shadow: 0 40px 90px -46px rgba(0, 0, 0, 1), 0 0 0 1px rgba(49, 92, 255, .10), inset 0 1px 0 rgba(255, 255, 255, .06);
     backdrop-filter: blur(10px);
 }
+
+/* Paleta inspirada en el panel de Render de la referencia. */
+:root {
+    --bg: #090d14;
+    --bg-soft: #0d121b;
+    --surface: #10151e;
+    --surface-2: #171e2a;
+    --border: #303847;
+    --border-soft: #252c39;
+    --accent: #315cff;
+    --accent-2: #6684ff;
+    --glow: rgba(49, 92, 255, .25);
+}
+body { background: var(--bg) !important; }
+.app-header { background: #10151e !important; border-bottom-color: var(--border) !important; }
+.app-drawer { background: #0d121b !important; }
+.tarjeta, .q-expansion-item, .panel-acceso { background: #10151e !important; }
+.btn-primario { background: #315cff !important; color: #fff !important; border-color: #597bff !important; box-shadow: none !important; }
+.btn-primario:hover { box-shadow: 0 0 0 3px rgba(49, 92, 255, .25) !important; }
+.grid > .metrica::after { background: #315cff !important; box-shadow: none !important; }
 
 /* ---------- Barra de desplazamiento ---------- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: #04060A; }
 ::-webkit-scrollbar-thumb { background: #1C2740; border-radius: 8px; border: 2px solid #04060A; }
-::-webkit-scrollbar-thumb:hover { background: #2F6BFF; }
+::-webkit-scrollbar-thumb:hover { background: #315CFF; }
 
 /* ---------- Foco accesible ---------- */
 .q-btn:focus-visible, .q-field--focused .q-field__control { outline: none; }
@@ -1879,11 +1916,19 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
             cur = None
             try:
                 cur = conn.cursor()
+                if codigo_partido_ya_existe(cur, codigo):
+                    conn.rollback()
+                    aviso("Este código de partido ya está registrado por un usuario.")
+                    return
                 cur.execute("""
                     INSERT INTO partidos (usuario_id, codigo_partido, fecha, tiempo_ejecucion, tarifa, tipo_partido)
                     VALUES (%s, %s, %s, %s, %s, %s);
                 """, (usuario["id"], codigo, fecha_p, tiempo_guardar, tarifa, tipo))
                 conn.commit()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                aviso("Este código de partido ya está registrado por un usuario.")
+                return
             except Exception as e:
                 conn.rollback()
                 error(f"No se pudo guardar el partido: {e}")
@@ -2007,9 +2052,13 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
                     fila = fila.iloc[0]
                     propietario = int(fila["usuario_id"])
                     fecha_edit = fecha_desde_iso(f_e.value)
+                    codigo_edit = (c_e.value or "").strip()
                     tiempo_edit_val = (t_e.value or "").strip()
                     segundos_edit = parsear_tiempo_a_segundos(tiempo_edit_val) if tiempo_edit_val else None
 
+                    if not codigo_edit:
+                        aviso("Ingrese el código del partido.")
+                        return
                     if not fecha_edit:
                         aviso("Seleccione una fecha válida.")
                         return
@@ -2025,23 +2074,31 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
                     cur = None
                     try:
                         cur = conn.cursor()
+                        if codigo_partido_ya_existe(cur, codigo_edit, sel.value):
+                            conn.rollback()
+                            aviso("Este código de partido ya está registrado por un usuario.")
+                            return
                         if es_admin_estricto(usuario):
                             cur.execute("""
                                 UPDATE partidos
                                 SET fecha = %s, codigo_partido = %s, tiempo_ejecucion = %s, tarifa = %s
                                 WHERE id = %s AND usuario_id = %s;
-                            """, (fecha_edit, (c_e.value or "").strip(), tiempo_edit,
+                            """, (fecha_edit, codigo_edit, tiempo_edit,
                                   float(tar_e.value or 0), sel.value, propietario))
                         else:
                             cur.execute("""
                                 UPDATE partidos
                                 SET fecha = %s, codigo_partido = %s, tiempo_ejecucion = %s
                                 WHERE id = %s AND usuario_id = %s;
-                            """, (fecha_edit, (c_e.value or "").strip(), tiempo_edit,
+                            """, (fecha_edit, codigo_edit, tiempo_edit,
                                   sel.value, propietario))
                         if cur.rowcount != 1:
                             raise PermissionError("No tienes permiso para modificar este registro.")
                         conn.commit()
+                    except psycopg2.errors.UniqueViolation:
+                        conn.rollback()
+                        aviso("Este código de partido ya está registrado por un usuario.")
+                        return
                     except Exception as e:
                         conn.rollback()
                         error(f"No se pudo modificar el partido: {e}")
