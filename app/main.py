@@ -808,6 +808,11 @@ ESTILOS = """@import url('https://fonts.googleapis.com/css2?family=Inter:wght@40
 
 /* Negro desde el primer pintado: evita el destello blanco al cargar */
 html, body { background: #090D14 !important; color-scheme: dark; }
+body::before {
+    content: ''; position: fixed; top: 0; left: 0; right: 0; height: 440px; z-index: 0; pointer-events: none;
+    background: radial-gradient(1000px 430px at 50% -170px, rgba(49, 92, 255, .22), transparent 62%);
+}
+.nicegui-content { position: relative; z-index: 1; }
 
 :root {
     --bg: #090D14;
@@ -849,22 +854,38 @@ body, .q-page-container, .nicegui-content {
 .app-header {
     background: var(--bg-soft) !important;
     border-bottom: 1px solid var(--border) !important;
-    padding: .6rem 1.5rem !important;
+    padding: .5rem .85rem !important;
     align-items: center;
 }
 
+.brand-mark { display: inline-flex; filter: drop-shadow(0 6px 18px rgba(49, 92, 255, .35)); }
 .app-brand {
-    display: inline-flex; align-items: center; gap: .6rem;
-    font-family: 'Inter', sans-serif;
-    font-size: 1.02rem; font-weight: 700; letter-spacing: -.01em; color: #FFFFFF;
+    display: block; font-family: 'Inter', sans-serif;
+    font-size: 1rem; font-weight: 800; letter-spacing: .045em; color: #FFFFFF;
+    line-height: 1.1; white-space: nowrap;
 }
-
-.app-brand::before {
-    content: ''; width: 30px; height: 30px; border-radius: 6px;
-    background: var(--accent);
+.app-brand em { font-style: normal; color: #00D68F; }
+.brand-tag {
+    font-size: .56rem; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--muted); font-weight: 700; white-space: nowrap;
 }
-
-.app-brand span { color: var(--accent-hover); }
+.drawer-toggle {
+    color: var(--text-soft) !important; border: 1px solid var(--border) !important;
+    border-radius: 9px !important; background: var(--surface) !important;
+}
+.drawer-toggle:hover { color: #FFFFFF !important; border-color: #3A475C !important; background: var(--surface-2) !important; }
+.header-user {
+    display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--text-soft);
+    background: var(--surface); border: 1px solid var(--border); padding: .32rem .7rem; border-radius: 999px;
+    white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+.live-pill {
+    display: inline-flex; align-items: center; gap: .4rem; font-size: .6rem; letter-spacing: .15em;
+    font-weight: 800; color: #00D68F; background: rgba(0, 214, 143, .08);
+    border: 1px solid rgba(0, 214, 143, .35); border-radius: 999px; padding: .3rem .65rem; white-space: nowrap;
+}
+.live-dot { width: .45rem; height: .45rem; border-radius: 50%; background: #00D68F; animation: pulso 1.6s ease-in-out infinite; }
+@keyframes pulso { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
 /* ---------- Menú lateral (como el sidebar de Render) ---------- */
 .app-drawer {
@@ -1057,25 +1078,32 @@ body, .q-page-container, .nicegui-content {
 /* ---------- Acceso ---------- */
 .login-wrap { width: 100%; max-width: 470px; margin: 6vh auto 0; }
 
-.login-brand-icon {
-    width: 58px; height: 58px; margin: 0 auto .85rem; border-radius: 10px;
+.login-crest {
+    position: relative; width: 96px; height: 96px; margin: 0 auto 1rem;
     display: flex; align-items: center; justify-content: center;
-    background: var(--accent);
-    color: #FFFFFF; font-size: 1rem; font-weight: 800; letter-spacing: -.02em;
 }
+.login-crest::before {
+    content: ''; position: absolute; inset: -28px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(49, 92, 255, .38), transparent 70%);
+}
+.login-crest svg { position: relative; filter: drop-shadow(0 10px 26px rgba(49, 92, 255, .4)); }
 
 .login-name {
     font-family: 'Inter', sans-serif;
-    font-size: 1.72rem; font-weight: 700; letter-spacing: -.02em;
-    color: #FFFFFF; text-align: center; line-height: 1.15;
+    font-size: 1.85rem; font-weight: 800; letter-spacing: .03em;
+    color: #FFFFFF; text-align: center; line-height: 1.12;
 }
 
-.login-name span { color: var(--accent-hover); }
-.login-sub { font-size: .63rem; letter-spacing: .18em; color: var(--muted); text-align: center; font-weight: 700; }
+.login-name span { color: #00D68F; }
+.login-sub { font-size: .6rem; letter-spacing: .24em; color: var(--muted); text-align: center; font-weight: 700; margin-top: .3rem; }
 
 .login-line {
-    width: 108px; height: 3px; margin: .9rem auto 1.1rem; border-radius: 4px;
+    position: relative; width: 128px; height: 3px; margin: .95rem auto 1.15rem; border-radius: 4px;
     background: var(--accent);
+}
+.login-line::after {
+    content: ''; position: absolute; right: -9px; top: -3.5px; width: 10px; height: 10px;
+    border-radius: 50%; background: #00D68F;
 }
 
 .panel-acceso {
@@ -1093,12 +1121,27 @@ body, .q-page-container, .nicegui-content {
 /* ---------- Foco accesible ---------- */
 .q-btn:focus-visible, .q-field--focused .q-field__control { outline: none; }
 
-@media (max-width: 700px) {
-    .nicegui-content { padding: 1rem .8rem 2.5rem !important; }
-    .titulo-pagina { font-size: 1.14rem; }
-    .metrica-valor { font-size: 1.08rem; }
-    .tarjeta { padding: .85rem .9rem; }
-    .login-wrap { margin-top: 2.5vh; }
+@media (max-width: 760px) {
+    .brand-tag, .header-user, .live-pill { display: none; }
+    .app-brand { font-size: .88rem; letter-spacing: .03em; }
+    .app-header { padding: .45rem .55rem !important; }
+    .nicegui-content { padding: .75rem .65rem calc(2.2rem + env(safe-area-inset-bottom, 0px)) !important; }
+    .titulo-pagina { font-size: 1.12rem; letter-spacing: -.01em; }
+    .metrica { padding: .75rem .8rem; }
+    .metrica-valor { font-size: .98rem; }
+    .tarjeta { padding: .8rem .85rem; border-radius: 12px; }
+    .q-drawer { width: min(300px, 86vw) !important; }
+    .login-wrap { margin-top: 1.5rem; max-width: 100%; padding: 0 .15rem; }
+    .login-name { font-size: 1.32rem; }
+    .login-sub { letter-spacing: .13em; font-size: .53rem; }
+    .panel-acceso { padding: 1rem 1rem 1.15rem; border-radius: 14px; }
+    .subtitulo { font-size: .86rem; }
+    .q-table th { font-size: .58rem !important; padding: .5rem .45rem !important; }
+    .q-table tbody td { font-size: .72rem !important; padding: .45rem .45rem !important; }
+}
+@media (max-width: 400px) {
+    .app-brand { font-size: .8rem; }
+    .login-name { font-size: 1.15rem; }
 }
 """
 
@@ -1127,6 +1170,21 @@ def tarjeta(clases=""):
 def rejilla(clases):
     """Contenedor CSS grid (evita el flex de ui.row para repartir columnas)."""
     return ui.element("div").classes(f"grid {clases} w-full")
+
+
+def _logo_svg(tam=40):
+    """Marca ESAM 360°: anillo 360° azul, punto verde electrico y barras de estadistica."""
+    return (
+        f'<svg width="{tam}" height="{tam}" viewBox="0 0 48 48" fill="none" '
+        'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ESAM 360">'
+        '<rect x="1" y="1" width="46" height="46" rx="12.5" fill="#0D1424" stroke="#26324A" stroke-width="1.5"/>'
+        '<path d="M24 7.6a16.4 16.4 0 1 1-12.1 5.1" stroke="#315CFF" stroke-width="4" stroke-linecap="round"/>'
+        '<circle cx="12.1" cy="12.5" r="3.1" fill="#00D68F"/>'
+        '<rect x="17.1" y="25.6" width="4.4" height="9" rx="1.3" fill="#8FA8FF"/>'
+        '<rect x="23" y="19.6" width="4.4" height="15" rx="1.3" fill="#4A6FFF"/>'
+        '<rect x="28.9" y="24.6" width="4.4" height="10" rx="1.3" fill="#315CFF"/>'
+        '</svg>'
+    )
 
 
 def metrica(etiqueta, valor, pie=""):
@@ -1202,9 +1260,9 @@ def es_admin_estricto(usuario) -> bool:
 # =========================================================
 def _vista_acceso():
     with ui.column().classes("login-wrap items-center gap-2"):
-        ui.html("""
+        ui.html(f"""
             <div style="text-align:center;">
-                <div class="login-brand-icon">ESAM</div>
+                <div class="login-crest">{_logo_svg(96)}</div>
                 <div class="login-name">ESAM ANALYTICS <span>360°</span></div>
                 <div class="login-sub">CENTRO DE CONTROL · ESTADÍSTICAS Y OPERACIONES</div>
                 <div class="login-line"></div>
@@ -1336,9 +1394,11 @@ def _objetivo(usuario, estado):
 
 def _dibujar_drawer(usuario, estado, refrescar):
     with ui.column().classes("w-full gap-1"):
-        ui.label("💻 ESAM Analytics").classes("app-brand")
-        ui.label("360° Stats Pro").classes("etiqueta")
-        ui.label(f"👤 {usuario['nombre']}").classes("aviso").style("margin-top:.35rem")
+        with ui.row().classes("items-center gap-2"):
+            ui.html(_logo_svg(36)).classes("brand-mark")
+            ui.html('<div class="app-brand" style="font-size:.9rem">ESAM ANALYTICS <em>360°</em></div>'
+                    '<div class="brand-tag">360° Stats Pro</div>')
+        ui.html(f'<span class="header-user" style="margin-top:.45rem">👤 {usuario["nombre"]}</span>')
         ui.element("div").classes("separador")
 
         for clave, texto in MENUS:
@@ -1431,18 +1491,21 @@ def _vista_app(usuario):
     estado.setdefault("analista", 0)
     estado.setdefault("modo_admin", True)
 
-    with ui.header().classes("app-header"):
-        with ui.element("div").classes("w-full flex items-center justify-between gap-3"):
-            with ui.column().classes("gap-0"):
-                ui.label("ESAM ANALYTICS 360°").classes("app-brand")
-                ui.label("Centro de control · estadísticas y operaciones").classes("etiqueta")
-            with ui.row().classes("items-center gap-3 no-wrap"):
-                ui.label(f"👤 {usuario['nombre']}").classes("aviso")
-                ui.button("Salir", icon="logout", on_click=_cerrar_sesion).props(
-                    "flat no-caps"
-                ).classes("btn-suave")
-
     drawer = ui.left_drawer(value=True).classes("app-drawer").style("width:300px")
+
+    with ui.header().classes("app-header"):
+        with ui.element("div").classes("w-full flex items-center justify-between gap-2"):
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                ui.button(icon="menu", on_click=drawer.toggle).props("flat round dense").classes("drawer-toggle")
+                ui.html(_logo_svg(38)).classes("brand-mark")
+                ui.html('<div class="app-brand">ESAM ANALYTICS <em>360°</em></div>'
+                        '<div class="brand-tag">Centro de control</div>')
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                ui.html('<span class="live-pill"><span class="live-dot"></span>EN&nbsp;VIVO</span>')
+                ui.html(f'<span class="header-user" title="{usuario["nombre"]}">👤 {usuario["nombre"]}</span>')
+                ui.button("Salir", icon="logout", on_click=_cerrar_sesion).props(
+                    "flat no-caps dense"
+                ).classes("btn-suave")
     contenido = ui.column().classes("w-full gap-3")
 
     def refrescar():
