@@ -802,7 +802,7 @@ ESTILOS = """@import url('https://fonts.googleapis.com/css2?family=Inter:wght@40
 /* ============================================================
    ESAM Analytics 360° — Paleta Render (panel de la foto)
    Fondo plano #090D14 · Superficie #10151E · Borde #2A3441
-   Azul sólido #315CFF · Verde Live #22C55E · Texto #FFFFFF
+   Azul sólido #315CFF · Verde eléctrico #00D68F · Texto #FFFFFF
    Sin degradados, sin brillos, sin sombras de color.
    ============================================================ */
 
@@ -823,7 +823,7 @@ html, body { background: #090D14 !important; color-scheme: dark; }
     --accent: #315CFF;
     --accent-hover: #4A6FFF;
     --accent-soft: rgba(49, 92, 255, .14);
-    --success: #22C55E;
+    --success: #00D68F;
     --danger: #EF4444;
     --warning: #F59E0B;
     --radio: 8px;
@@ -935,11 +935,11 @@ body, .q-page-container, .nicegui-content {
     background: var(--accent);
 }
 
-/* Todas las métricas con el mismo azul de Render (antes: verde/morado/amarillo) */
+/* Métricas planas: azul Render; la 3.ª (Béisbol) lleva el verde eléctrico #00D68F */
 .grid > .metrica:nth-child(2)::after,
-.grid > .metrica:nth-child(3)::after,
 .grid > .metrica:nth-child(4)::after,
 .grid > .metrica:nth-child(5)::after { background: var(--accent); }
+.grid > .metrica:nth-child(3)::after { background: #00D68F; }
 
 .metrica-label {
     font-size: .655rem; letter-spacing: .09em; text-transform: uppercase;
