@@ -1,7 +1,7 @@
 FROM zauberzeug/nicegui:latest
 
-# Instala el compilador C necesario para asyncpg
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+# Instala dependencias del sistema necesarias para compilar asyncpg
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -11,4 +11,5 @@ RUN uv pip install --system --no-cache -r requirements.txt
 COPY . .
 
 EXPOSE 8080
-CMD ["python", "app/main.py"]
+# Usa el Python del entorno virtual donde se instalaron las dependencias
+CMD ["/opt/venv/bin/python", "app/main.py"]
