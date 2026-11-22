@@ -326,13 +326,6 @@ def init_db():
             );
         """)
 
-        # Conserva los datos históricos si ya hay duplicados; la aplicación
-        # igualmente impide nuevas cargas duplicadas dentro de una transacción.
-        try:
-            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_partidos_codigo_normalizado ON partidos (btrim(codigo_partido));")
-        except psycopg2.errors.UniqueViolation:
-            print("[ESAM] Hay códigos de partido duplicados históricos. Revísalos antes de crear el índice único; no se eliminó ningún registro.")
-
         cur.execute("CREATE INDEX IF NOT EXISTS idx_partidos_usuario_fecha ON partidos (usuario_id, fecha);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_partidos_fecha ON partidos (fecha);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_picheos_usuario_fecha ON picheos (usuario_id, fecha);")
@@ -395,16 +388,6 @@ def init_db():
         except Exception:
             pass
         cerrar_conexion(conn)
-
-
-def codigo_partido_ya_existe(cur, codigo, excluir_id=None):
-    """Serializa escrituras desde esta app y busca el código en todos los usuarios."""
-    cur.execute("SELECT pg_advisory_xact_lock(1163084109);")
-    cur.execute(
-        "SELECT 1 FROM partidos WHERE btrim(codigo_partido) = %s AND (%s::integer IS NULL OR id <> %s) LIMIT 1;",
-        (codigo, excluir_id, excluir_id),
-    )
-    return cur.fetchone() is not None
 
 
 # =========================================================
@@ -525,9 +508,13 @@ def _ids_usuarios():
 
 def recalcular_tarifas_quincena_basket(u_id, fecha_ref):
     """
-    1. Cuenta EXCLUSIVAMENTE los partidos de modalidad 'quincenal' en la quincena dada.
-    2. Los partidos 'en_vivo_normal' y 'en_vivo_nba' NO CUENTAN para el volumen del tramo.
+    1. Cuenta TODOS los partidos de la quincena (estándar + en vivo) para el tramo.
+    2. Los partidos 'en_vivo_normal' y 'en_vivo_nba' SUMAN a la acumulación pero
+       conservan su precio en vivo (12.00 $ / 18.50 $).
     3. Actualiza RETROACTIVAMENTE solo la tarifa de los partidos 'quincenal'.
+
+    Ejemplo: 30 partidos en la quincena (25 estándar + 5 en vivo de 12 $) => tramo 5
+    (8.00 $): 25 x 8.00 + 5 x 12.00 = 260.00 $.
     """
     if u_id == 0:
         for uid in _ids_usuarios():
@@ -545,12 +532,11 @@ def recalcular_tarifas_quincena_basket(u_id, fecha_ref):
             SELECT COUNT(*) FROM partidos
             WHERE usuario_id = %s
               AND fecha >= %s
-              AND fecha <= %s
-              AND (tipo_partido IS NULL OR tipo_partido = 'quincenal');
+              AND fecha <= %s;
         """, (u_id, iq_i, iq_f))
-        partidos_quincenales = cur.fetchone()[0]
+        total_partidos = cur.fetchone()[0]
 
-        nueva_tarifa = obtener_tarifa_basket("quincenal", partidos_quincenales)
+        nueva_tarifa = obtener_tarifa_basket("quincenal", total_partidos)
 
         cur.execute("""
             UPDATE partidos
@@ -563,6 +549,114 @@ def recalcular_tarifas_quincena_basket(u_id, fecha_ref):
         conn.commit()
     except Exception as e:
         print(f"[ESAM] Error al recalcular quincena: {e}")
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+        cerrar_conexion(conn)
+
+
+def recalcular_todos_los_tramos_basket():
+    """Reaplica la regla de tramos a todo el histórico (en vivo suma, conserva su precio)."""
+    tasas = obtener_tasas_globales()
+
+    def tarifa_tramo(n_partidos):
+        if n_partidos <= 11:
+            return tasas["tramo_1"]
+        if n_partidos <= 14:
+            return tasas["tramo_2"]
+        if n_partidos <= 26:
+            return tasas["tramo_3"]
+        if n_partidos <= 29:
+            return tasas["tramo_4"]
+        return tasas["tramo_5"]
+
+    conn = get_db_connection()
+    if not conn:
+        return False
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT usuario_id,
+                   DATE_TRUNC('month', fecha) AS mes,
+                   CASE WHEN EXTRACT(DAY FROM fecha) <= 15 THEN 1 ELSE 2 END AS quincena,
+                   COUNT(*) AS total
+            FROM partidos
+            GROUP BY usuario_id, mes, quincena;
+        """)
+        for usuario_id, mes, quincena, total in cur.fetchall():
+            cur.execute("""
+                UPDATE partidos
+                SET tarifa = %s
+                WHERE usuario_id = %s
+                  AND DATE_TRUNC('month', fecha) = %s
+                  AND CASE WHEN EXTRACT(DAY FROM fecha) <= 15 THEN 1 ELSE 2 END = %s
+                  AND (tipo_partido IS NULL OR tipo_partido = 'quincenal');
+            """, (tarifa_tramo(int(total)), usuario_id, mes, int(quincena)))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"[ESAM] Error al recalcular el histórico de básquetbol: {e}")
+        return False
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+        cerrar_conexion(conn)
+
+
+def migrar_tarifas_conteo_en_vivo():
+    """
+    Migración única: antes los partidos en vivo no sumaban al tramo, así que las
+    tarifas estándar guardadas quedaron bajas. Se corrigen una sola vez y se marca
+    la bandera 'esquema_conteo_en_vivo' para no repetirlo en cada arranque.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM configuracion_global WHERE clave = 'esquema_conteo_en_vivo';")
+        ya_aplicada = cur.fetchone() is not None
+    except Exception as e:
+        print(f"[ESAM] No se pudo verificar la migración de tramos: {e}")
+        return
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+        cerrar_conexion(conn)
+
+    if ya_aplicada:
+        return
+    if not recalcular_todos_los_tramos_basket():
+        return
+
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO configuracion_global (clave, valor)
+            VALUES ('esquema_conteo_en_vivo', 1)
+            ON CONFLICT (clave) DO NOTHING;
+        """)
+        conn.commit()
+        print("[ESAM] Tarifas históricas de básquetbol recalculadas (en vivo suma al tramo).")
+    except Exception as e:
+        conn.rollback()
+        print(f"[ESAM] No se pudo marcar la migración de tramos: {e}")
     finally:
         try:
             if cur is not None:
@@ -797,42 +891,31 @@ def iso_fecha(valor):
 # =========================================================
 # 6. ESTILOS
 # =========================================================
-ESTILOS = """@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-/* ============================================================
-   ESAM Analytics 360° — Paleta Render (panel de la foto)
-   Fondo plano #090D14 · Superficie #10151E · Borde #2A3441
-   Azul sólido #315CFF · Verde eléctrico #00D68F · Texto #FFFFFF
-   Sin degradados, sin brillos, sin sombras de color.
-   ============================================================ */
+ESTILOS = """@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap');
 
 /* Negro desde el primer pintado: evita el destello blanco al cargar */
-html, body { background: #090D14 !important; color-scheme: dark; }
-body::before {
-    content: ''; position: fixed; top: 0; left: 0; right: 0; height: 440px; z-index: 0; pointer-events: none;
-    background: radial-gradient(1000px 430px at 50% -170px, rgba(49, 92, 255, .22), transparent 62%);
-}
-.nicegui-content { position: relative; z-index: 1; }
+html, body { background: #04060A !important; color-scheme: dark; }
 
 :root {
-    --bg: #090D14;
-    --bg-soft: #0D121B;
-    --surface: #10151E;
-    --surface-2: #171E2A;
-    --surface-3: #1F2937;
-    --border: #2A3441;
-    --border-soft: #1E293B;
-    --text: #FFFFFF;
-    --text-soft: #CBD5E1;
-    --muted: #94A3B8;
-    --accent: #315CFF;
-    --accent-hover: #4A6FFF;
-    --accent-soft: rgba(49, 92, 255, .14);
+    --bg: #04060A;
+    --bg-soft: #070B12;
+    --surface: #0A0F18;
+    --surface-2: #0F1521;
+    --surface-3: #141C2B;
+    --border: #1C2740;
+    --border-soft: #151D2C;
+    --text: #F3F7FF;
+    --text-soft: #C4D0E2;
+    --muted: #8695AE;
+    --accent: #2F6BFF;
+    --accent-2: #00C8FF;
+    --accent-dark: #1B4FE0;
+    --glow: rgba(47, 107, 255, .45);
     --success: #00D68F;
-    --danger: #EF4444;
-    --warning: #F59E0B;
-    --radio: 8px;
-    --radio-sm: 6px;
+    --danger: #FF5470;
+    --warning: #FFB020;
+    --radio: 16px;
+    --radio-sm: 11px;
 }
 
 /* ---------- Base ---------- */
@@ -843,109 +926,108 @@ body, .q-page-container, .nicegui-content {
     -webkit-font-smoothing: antialiased;
 }
 
+body {
+    background:
+        radial-gradient(900px 480px at 12% -10%, rgba(47, 107, 255, .22), transparent 62%),
+        radial-gradient(760px 420px at 92% 0%, rgba(0, 200, 255, .14), transparent 60%),
+        var(--bg) !important;
+}
+
 .nicegui-content { padding: 1.6rem 2rem 3.5rem !important; max-width: 1560px; margin: 0 auto; width: 100%; }
 
 .q-page, .q-layout, .q-drawer, .q-header { background: transparent !important; color: var(--text) !important; }
-.q-card, .q-dialog__inner > .q-card { background: var(--surface) !important; color: var(--text) !important; border: 1px solid var(--border) !important; }
+.q-card, .q-dialog__inner > .q-card { background: var(--surface) !important; color: var(--text) !important; }
 .q-tab-panel { background: transparent !important; padding: .55rem 0 0 !important; }
-::selection { background: var(--accent); color: #FFFFFF; }
+::selection { background: rgba(47, 107, 255, .45); color: #FFFFFF; }
 
-/* ---------- Cabecera (como la barra superior de Render) ---------- */
+/* ---------- Cabecera ---------- */
 .app-header {
-    background: var(--bg-soft) !important;
-    border-bottom: 1px solid var(--border) !important;
-    padding: .5rem .85rem !important;
+    background: rgba(4, 6, 10, .86) !important;
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid rgba(47, 107, 255, .22) !important;
+    padding: .6rem 1.5rem !important;
     align-items: center;
 }
 
-.brand-mark { display: inline-flex; filter: drop-shadow(0 6px 18px rgba(49, 92, 255, .35)); }
 .app-brand {
-    display: block; font-family: 'Inter', sans-serif;
-    font-size: 1rem; font-weight: 800; letter-spacing: .045em; color: #FFFFFF;
-    line-height: 1.1; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: .6rem;
+    font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+    font-size: 1.02rem; font-weight: 800; letter-spacing: -.02em; color: #FFFFFF;
 }
-.app-brand em { font-style: normal; color: #00D68F; }
-.brand-tag {
-    font-size: .56rem; letter-spacing: .22em; text-transform: uppercase;
-    color: var(--muted); font-weight: 700; white-space: nowrap;
-}
-.drawer-toggle {
-    color: var(--text-soft) !important; border: 1px solid var(--border) !important;
-    border-radius: 9px !important; background: var(--surface) !important;
-}
-.drawer-toggle:hover { color: #FFFFFF !important; border-color: #3A475C !important; background: var(--surface-2) !important; }
-.header-user {
-    display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--text-soft);
-    background: var(--surface); border: 1px solid var(--border); padding: .32rem .7rem; border-radius: 999px;
-    white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
-}
-.live-pill {
-    display: inline-flex; align-items: center; gap: .4rem; font-size: .6rem; letter-spacing: .15em;
-    font-weight: 800; color: #00D68F; background: rgba(0, 214, 143, .08);
-    border: 1px solid rgba(0, 214, 143, .35); border-radius: 999px; padding: .3rem .65rem; white-space: nowrap;
-}
-.live-dot { width: .45rem; height: .45rem; border-radius: 50%; background: #00D68F; animation: pulso 1.6s ease-in-out infinite; }
-@keyframes pulso { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
-/* ---------- Menú lateral (como el sidebar de Render) ---------- */
+.app-brand::before {
+    content: ''; width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 0 0 1px rgba(0, 200, 255, .35), 0 8px 22px -8px var(--glow);
+}
+
+.app-brand span { color: var(--accent-2); }
+
+/* ---------- Menú lateral ---------- */
 .app-drawer {
-    background: var(--bg-soft) !important;
-    border-right: 1px solid var(--border) !important;
+    background: linear-gradient(180deg, #060A12 0%, #04060A 100%) !important;
+    border-right: 1px solid var(--border-soft) !important;
 }
 
 .app-drawer .q-drawer__content { padding: 1rem .8rem 1.4rem; }
 
 .menu-item {
-    width: 100%; justify-content: flex-start; color: var(--text-soft) !important;
+    width: 100%; justify-content: flex-start; color: #A6B4CA !important;
     border: 1px solid transparent; border-radius: var(--radio-sm);
-    text-transform: none; font-weight: 500; font-size: .855rem;
+    text-transform: none; font-weight: 600; font-size: .855rem;
     padding: .5rem .7rem; min-height: 40px;
-    transition: background .15s ease, color .15s ease, border-color .15s ease;
+    transition: background .16s ease, color .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
 
 .menu-item:hover {
-    background: var(--surface-2) !important;
+    background: rgba(47, 107, 255, .12) !important;
     color: #FFFFFF !important;
-    border-color: var(--border);
+    border-color: rgba(47, 107, 255, .28);
 }
 
 .menu-item.activo {
-    background: var(--accent) !important;
+    background: linear-gradient(90deg, rgba(47, 107, 255, .38), rgba(0, 200, 255, .10)) !important;
     color: #FFFFFF !important;
-    border-color: var(--accent);
+    border-color: rgba(47, 107, 255, .55);
+    box-shadow: inset 3px 0 0 var(--accent-2), 0 10px 26px -18px var(--glow);
 }
 
 /* ---------- Tipografía ---------- */
 .titulo-pagina {
-    font-family: 'Inter', sans-serif;
-    font-size: clamp(1.28rem, 2vw, 1.5rem); font-weight: 700;
-    letter-spacing: -.02em; color: #FFFFFF; line-height: 1.28;
+    font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+    font-size: clamp(1.28rem, 2vw, 1.5rem); font-weight: 800;
+    letter-spacing: -.03em; color: #FFFFFF; line-height: 1.28;
 }
 
 .subtitulo {
     display: flex; align-items: center; gap: .55rem;
-    font-size: .95rem; font-weight: 600; color: #FFFFFF; letter-spacing: -.01em;
+    font-size: .95rem; font-weight: 700; color: #E9F1FF; letter-spacing: -.01em;
 }
 
 .subtitulo::before {
     content: ''; width: 3px; height: 15px; border-radius: 2px; flex: none;
-    background: var(--accent);
+    background: linear-gradient(180deg, var(--accent-2), var(--accent));
+    box-shadow: 0 0 10px var(--glow);
 }
 
-.etiqueta { font-size: .655rem; letter-spacing: .11em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
-.aviso { font-size: .795rem; color: var(--muted); line-height: 1.55; }
-.nota { font-size: .795rem; color: var(--text-soft); }
+.etiqueta { font-size: .655rem; letter-spacing: .11em; text-transform: uppercase; color: #7E90AB; font-weight: 800; }
+.aviso { font-size: .795rem; color: #8FA1BC; line-height: 1.55; }
+.nota { font-size: .795rem; color: #A9BDDA; }
 
-/* ---------- Tarjetas y métricas (planas, como las tarjetas de Render) ---------- */
+/* ---------- Tarjetas y métricas ---------- */
 .tarjeta {
-    background: var(--surface);
+    background: linear-gradient(168deg, #0B111C 0%, #06090F 100%);
     border: 1px solid var(--border);
     border-radius: var(--radio);
     padding: 1.05rem 1.15rem; gap: .3rem; min-width: 0;
-    transition: border-color .15s ease;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045), 0 22px 44px -34px rgba(0, 0, 0, 1);
+    transition: border-color .18s ease, box-shadow .18s ease;
 }
 
-.tarjeta:hover { border-color: #3A475C; }
+.tarjeta:hover {
+    border-color: rgba(47, 107, 255, .45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 24px 50px -32px rgba(47, 107, 255, .55);
+}
 
 .tarjeta-tabla { padding: .45rem .55rem; }
 
@@ -953,195 +1035,180 @@ body, .q-page-container, .nicegui-content {
 
 .metrica::after {
     content: ''; position: absolute; inset: 0 0 auto 0; height: 3px;
-    background: var(--accent);
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    box-shadow: 0 0 16px rgba(0, 200, 255, .55);
 }
 
-/* Métricas planas: azul Render; la 3.ª (Béisbol) lleva el verde eléctrico #00D68F */
-.grid > .metrica:nth-child(2)::after,
-.grid > .metrica:nth-child(4)::after,
-.grid > .metrica:nth-child(5)::after { background: var(--accent); }
-.grid > .metrica:nth-child(3)::after { background: #00D68F; }
+.grid > .metrica:nth-child(2)::after { background: linear-gradient(90deg, #00C8FF, #6FE7FF); box-shadow: 0 0 16px rgba(0, 200, 255, .6); }
+.grid > .metrica:nth-child(3)::after { background: linear-gradient(90deg, #00D68F, #6BFFCB); box-shadow: 0 0 16px rgba(0, 214, 143, .5); }
+.grid > .metrica:nth-child(4)::after { background: linear-gradient(90deg, #A78BFA, #7C5CFF); box-shadow: 0 0 16px rgba(124, 92, 255, .5); }
+.grid > .metrica:nth-child(5)::after { background: linear-gradient(90deg, #FFB020, #FFD772); box-shadow: 0 0 16px rgba(255, 176, 32, .45); }
 
 .metrica-label {
     font-size: .655rem; letter-spacing: .09em; text-transform: uppercase;
-    color: var(--muted); font-weight: 700; line-height: 1.35; white-space: normal;
+    color: #8FA1BC; font-weight: 800; line-height: 1.35; white-space: normal;
 }
 
 .metrica-valor {
-    font-family: 'Inter', sans-serif;
-    font-size: clamp(1.12rem, 1.8vw, 1.5rem); font-weight: 700;
-    letter-spacing: -.02em; color: #FFFFFF; line-height: 1.16;
+    font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+    font-size: clamp(1.12rem, 1.8vw, 1.5rem); font-weight: 800;
+    letter-spacing: -.03em; color: #FFFFFF; line-height: 1.16;
     white-space: normal; overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 24px rgba(47, 107, 255, .35);
 }
 
-.metrica-pie { font-size: .715rem; color: var(--muted); line-height: 1.35; }
+.metrica-pie { font-size: .715rem; color: #8496B0; line-height: 1.35; }
 
-/* ---------- Campos (como el buscador de Render) ---------- */
+/* ---------- Campos ---------- */
 .q-field--outlined .q-field__control {
-    background: var(--bg-soft) !important; border-radius: var(--radio-sm) !important;
-    min-height: 42px;
+    background: #070B12 !important; border-radius: var(--radio-sm) !important;
+    min-height: 42px; transition: box-shadow .16s ease;
 }
 
 .q-field--outlined .q-field__control:before { border-color: var(--border) !important; }
-.q-field--outlined.q-field--focused .q-field__control:after { border-color: var(--accent) !important; }
-.q-field--outlined.q-field--focused .q-field__control { box-shadow: 0 0 0 3px rgba(49, 92, 255, .22); }
+.q-field--outlined.q-field--focused .q-field__control:after { border-color: var(--accent-2) !important; }
+.q-field--outlined.q-field--focused .q-field__control { box-shadow: 0 0 0 3px rgba(47, 107, 255, .22); }
 
 .q-field__native, .q-field__input, .q-field__prefix, .q-field__suffix { color: var(--text) !important; }
-.q-field__native::placeholder, .q-field__input::placeholder { color: #64748B !important; opacity: 1; }
-.q-field__label { color: var(--muted) !important; font-size: .82rem; }
+.q-field__native::placeholder, .q-field__input::placeholder { color: #6E809A !important; opacity: 1; }
+.q-field__label { color: #8FA1BC !important; font-size: .82rem; }
 .q-field--outlined .q-field__label { background: transparent !important; }
-.q-field__bottom { color: var(--muted) !important; }
+.q-field__bottom { color: #7E90AB !important; }
 
 .q-menu, .q-dialog__inner .q-card, .q-date, .q-time {
     background: var(--surface) !important; color: var(--text) !important;
-    border: 1px solid var(--border) !important; border-radius: var(--radio) !important;
+    border: 1px solid var(--border) !important; border-radius: 14px !important;
+    box-shadow: 0 28px 60px -28px rgba(0, 0, 0, 1) !important;
 }
 
-.q-date__header { background: var(--accent) !important; }
+.q-date__header { background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important; }
 .q-date__calendar-item button { color: var(--text-soft) !important; }
 .q-date__navigation { color: var(--text-soft) !important; }
 
-.q-item { color: var(--text-soft) !important; border-radius: 6px; }
+.q-item { color: var(--text-soft) !important; border-radius: 8px; }
 .q-item:hover { background: var(--surface-2) !important; color: #FFFFFF !important; }
 .q-checkbox__label, .q-radio__label { color: var(--text-soft) !important; font-size: .85rem; }
 
-/* ---------- Botones (azul sólido como Free/banner; secundario como Connect) ---------- */
-.q-btn { text-transform: none !important; font-weight: 600 !important; letter-spacing: 0 !important; }
-.q-btn { border-radius: var(--radio-sm); transition: background .15s ease, border-color .15s ease, color .15s ease; }
+/* ---------- Botones ---------- */
+.q-btn { text-transform: none !important; font-weight: 650 !important; letter-spacing: 0 !important; }
+.q-btn { border-radius: var(--radio-sm); transition: transform .14s ease, filter .14s ease, box-shadow .14s ease, background .14s ease; }
 
 .btn-primario {
-    background: var(--accent) !important;
-    color: #FFFFFF !important;
-    border: 1px solid var(--accent) !important;
+    background: linear-gradient(135deg, #3D7BFF 0%, #00C8FF 100%) !important;
+    color: #00121F !important;
+    border: 1px solid rgba(0, 200, 255, .55) !important;
+    box-shadow: 0 10px 26px -12px rgba(0, 200, 255, .85), inset 0 1px 0 rgba(255, 255, 255, .35) !important;
 }
 
-.btn-primario:hover { background: var(--accent-hover) !important; border-color: var(--accent-hover) !important; }
+.btn-primario:hover { filter: brightness(1.12) saturate(1.15); transform: translateY(-1px); box-shadow: 0 14px 34px -12px rgba(0, 200, 255, 1) !important; }
 .btn-primario:hover .q-focus-helper { opacity: 0 !important; }
 
-.btn-suave { color: var(--text-soft) !important; border: 1px solid var(--border) !important; background: var(--surface) !important; }
-.btn-suave:hover { background: var(--surface-2) !important; color: #FFFFFF !important; border-color: #3A475C !important; }
+.btn-suave { color: #BFD2EE !important; border: 1px solid rgba(47, 107, 255, .35) !important; background: rgba(47, 107, 255, .08) !important; }
+.btn-suave:hover { background: rgba(47, 107, 255, .20) !important; color: #FFFFFF !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(47, 107, 255, .16); }
 
-.btn-peligro { color: #FCA5A5 !important; background: rgba(239, 68, 68, .10) !important; border: 1px solid rgba(239, 68, 68, .55) !important; }
-.btn-peligro:hover { background: rgba(239, 68, 68, .20) !important; color: #FFFFFF !important; }
+.btn-peligro { color: #FFB3BE !important; background: rgba(255, 84, 112, .12) !important; border: 1px solid rgba(255, 84, 112, .55) !important; }
+.btn-peligro:hover { background: rgba(255, 84, 112, .24) !important; box-shadow: 0 0 0 3px rgba(255, 84, 112, .16); }
 
-.btn-descarga { background: var(--surface) !important; border: 1px solid var(--border) !important; color: var(--text-soft) !important; }
-.btn-descarga:hover { border-color: var(--accent) !important; color: #FFFFFF !important; background: var(--surface-2) !important; }
+.btn-descarga { background: #070B12 !important; border: 1px solid var(--border) !important; color: #AFC0D8 !important; }
+.btn-descarga:hover { border-color: var(--accent-2) !important; color: #FFFFFF !important; background: #0B1424 !important; box-shadow: 0 0 0 3px rgba(0, 200, 255, .14); }
 
 /* ---------- Tablas ---------- */
-.q-table__container { background: transparent !important; border-radius: var(--radio) !important; overflow: hidden; }
+.q-table__container { background: transparent !important; border-radius: 14px !important; overflow: hidden; }
 .tarjeta-tabla .q-table__container { border: none !important; }
 .q-table { background: transparent !important; color: var(--text-soft) !important; }
-.q-table thead tr { background: var(--bg-soft) !important; }
+.q-table thead tr { background: #080D16 !important; }
 
 .q-table th {
-    color: var(--muted) !important; font-size: .665rem !important; text-transform: uppercase;
-    letter-spacing: .085em; font-weight: 700; padding: .6rem .7rem !important;
+    color: #7E90AB !important; font-size: .665rem !important; text-transform: uppercase;
+    letter-spacing: .085em; font-weight: 800; padding: .6rem .7rem !important;
 }
 
 .q-table tbody td {
-    color: var(--text-soft) !important; font-size: .815rem !important; padding: .55rem .7rem !important;
-    border-bottom: 1px solid var(--border-soft) !important; font-variant-numeric: tabular-nums;
+    color: #D3DEEC !important; font-size: .815rem !important; padding: .55rem .7rem !important;
+    border-bottom: 1px solid #131B28 !important; font-variant-numeric: tabular-nums;
 }
 
-.q-table tbody tr:hover { background: var(--surface-2) !important; }
+.q-table tbody tr:hover { background: rgba(47, 107, 255, .10) !important; }
 .q-table tbody tr:last-child td { border-bottom: none !important; }
-.q-table__bottom { color: var(--muted) !important; background: transparent !important; }
+.q-table__bottom { color: #7E90AB !important; background: transparent !important; }
 
 /* ---------- Pestañas ---------- */
-.q-tabs { border-bottom: 1px solid var(--border); }
-.q-tab { color: var(--muted) !important; text-transform: none !important; font-weight: 600; font-size: .85rem; min-height: 42px; padding: 0 .95rem; }
-.q-tab--active { color: #FFFFFF !important; }
-.q-tab__indicator { background: var(--accent) !important; height: 2px !important; }
+.q-tabs { border-bottom: 1px solid var(--border-soft); }
+.q-tab { color: #8FA1BC !important; text-transform: none !important; font-weight: 700; font-size: .85rem; min-height: 42px; padding: 0 .95rem; }
+.q-tab--active { color: #FFFFFF !important; text-shadow: 0 0 20px rgba(0, 200, 255, .55); }
+.q-tab__indicator { background: linear-gradient(90deg, var(--accent), var(--accent-2)) !important; height: 3px !important; box-shadow: 0 0 12px rgba(0, 200, 255, .7); }
 
 /* ---------- Expansiones ---------- */
 .q-expansion-item {
-    background: var(--surface) !important;
+    background: linear-gradient(168deg, #0A1019 0%, #06090F 100%) !important;
     border: 1px solid var(--border) !important; border-radius: var(--radio) !important; overflow: hidden;
 }
 
-.q-expansion-item__container > .q-item { color: var(--text) !important; font-weight: 600; font-size: .88rem; padding: .6rem .9rem; min-height: auto; }
+.q-expansion-item__container > .q-item { color: var(--text) !important; font-weight: 700; font-size: .88rem; padding: .6rem .9rem; min-height: auto; }
 .q-expansion-item__content { padding: 0 .95rem .95rem; }
 .q-item__label { color: inherit !important; }
 
-/* ---------- Avisos / notificaciones ---------- */
+/* ---------- Avisos ---------- */
 .q-notification {
-    font-size: .85rem; border-radius: var(--radio) !important;
-    background: var(--surface-2) !important; color: #FFFFFF !important;
+    font-size: .85rem; border-radius: 12px !important;
+    background: var(--surface-2) !important; color: #EAF0FA !important;
     border: 1px solid var(--border) !important;
 }
 
-.q-notification--positive { border-color: rgba(34, 197, 94, .6) !important; }
-.q-notification--negative { border-color: rgba(239, 68, 68, .6) !important; }
+.q-notification--positive { border-color: rgba(0, 214, 143, .6) !important; }
+.q-notification--negative { border-color: rgba(255, 84, 112, .6) !important; }
 
-.separador { height: 1px; width: 100%; margin: .45rem 0; background: var(--border-soft); }
+.separador { height: 1px; width: 100%; margin: .45rem 0; background: linear-gradient(90deg, rgba(47, 107, 255, .55), rgba(47, 107, 255, .05)); }
 
 /* ---------- Acceso ---------- */
 .login-wrap { width: 100%; max-width: 470px; margin: 6vh auto 0; }
 
-.login-crest {
-    position: relative; width: 96px; height: 96px; margin: 0 auto 1rem;
+.login-brand-icon {
+    width: 58px; height: 58px; margin: 0 auto .85rem; border-radius: 18px;
     display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #2F6BFF, #00C8FF);
+    color: #04101C; font-size: 1rem; font-weight: 900; letter-spacing: -.05em;
+    box-shadow: 0 0 0 1px rgba(0, 200, 255, .45), 0 16px 40px -14px rgba(0, 200, 255, .95);
 }
-.login-crest::before {
-    content: ''; position: absolute; inset: -28px; border-radius: 50%;
-    background: radial-gradient(circle, rgba(49, 92, 255, .38), transparent 70%);
-}
-.login-crest svg { position: relative; filter: drop-shadow(0 10px 26px rgba(49, 92, 255, .4)); }
 
 .login-name {
-    font-family: 'Inter', sans-serif;
-    font-size: 1.85rem; font-weight: 800; letter-spacing: .03em;
-    color: #FFFFFF; text-align: center; line-height: 1.12;
+    font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+    font-size: 1.72rem; font-weight: 800; letter-spacing: -.035em;
+    color: #FFFFFF; text-align: center; line-height: 1.15;
 }
 
-.login-name span { color: #00D68F; }
-.login-sub { font-size: .6rem; letter-spacing: .24em; color: var(--muted); text-align: center; font-weight: 700; margin-top: .3rem; }
+.login-name span { color: var(--accent-2); }
+.login-sub { font-size: .63rem; letter-spacing: .18em; color: #8FA1BC; text-align: center; font-weight: 800; }
 
 .login-line {
-    position: relative; width: 128px; height: 3px; margin: .95rem auto 1.15rem; border-radius: 4px;
-    background: var(--accent);
-}
-.login-line::after {
-    content: ''; position: absolute; right: -9px; top: -3.5px; width: 10px; height: 10px;
-    border-radius: 50%; background: #00D68F;
+    width: 108px; height: 3px; margin: .9rem auto 1.1rem; border-radius: 4px;
+    background: linear-gradient(90deg, #2F6BFF, #00C8FF);
+    box-shadow: 0 0 16px rgba(0, 200, 255, .7);
 }
 
 .panel-acceso {
-    background: var(--surface);
+    background: linear-gradient(168deg, rgba(12, 18, 29, .96), rgba(4, 6, 10, .98));
     border: 1px solid var(--border);
-    border-radius: 12px; padding: 1.3rem 1.45rem 1.5rem; width: 100%;
+    border-radius: 22px; padding: 1.3rem 1.45rem 1.5rem; width: 100%;
+    box-shadow: 0 40px 90px -46px rgba(0, 0, 0, 1), 0 0 0 1px rgba(47, 107, 255, .10), inset 0 1px 0 rgba(255, 255, 255, .06);
+    backdrop-filter: blur(10px);
 }
 
 /* ---------- Barra de desplazamiento ---------- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; border: 2px solid var(--bg); }
-::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+::-webkit-scrollbar-track { background: #04060A; }
+::-webkit-scrollbar-thumb { background: #1C2740; border-radius: 8px; border: 2px solid #04060A; }
+::-webkit-scrollbar-thumb:hover { background: #2F6BFF; }
 
 /* ---------- Foco accesible ---------- */
 .q-btn:focus-visible, .q-field--focused .q-field__control { outline: none; }
 
-@media (max-width: 760px) {
-    .brand-tag, .header-user, .live-pill { display: none; }
-    .app-brand { font-size: .88rem; letter-spacing: .03em; }
-    .app-header { padding: .45rem .55rem !important; }
-    .nicegui-content { padding: .75rem .65rem calc(2.2rem + env(safe-area-inset-bottom, 0px)) !important; }
-    .titulo-pagina { font-size: 1.12rem; letter-spacing: -.01em; }
-    .metrica { padding: .75rem .8rem; }
-    .metrica-valor { font-size: .98rem; }
-    .tarjeta { padding: .8rem .85rem; border-radius: 12px; }
-    .q-drawer { width: min(300px, 86vw) !important; }
-    .login-wrap { margin-top: 1.5rem; max-width: 100%; padding: 0 .15rem; }
-    .login-name { font-size: 1.32rem; }
-    .login-sub { letter-spacing: .13em; font-size: .53rem; }
-    .panel-acceso { padding: 1rem 1rem 1.15rem; border-radius: 14px; }
-    .subtitulo { font-size: .86rem; }
-    .q-table th { font-size: .58rem !important; padding: .5rem .45rem !important; }
-    .q-table tbody td { font-size: .72rem !important; padding: .45rem .45rem !important; }
-}
-@media (max-width: 400px) {
-    .app-brand { font-size: .8rem; }
-    .login-name { font-size: 1.15rem; }
+@media (max-width: 700px) {
+    .nicegui-content { padding: 1rem .8rem 2.5rem !important; }
+    .titulo-pagina { font-size: 1.14rem; }
+    .metrica-valor { font-size: 1.08rem; }
+    .tarjeta { padding: .85rem .9rem; }
+    .login-wrap { margin-top: 2.5vh; }
 }
 """
 
@@ -1170,21 +1237,6 @@ def tarjeta(clases=""):
 def rejilla(clases):
     """Contenedor CSS grid (evita el flex de ui.row para repartir columnas)."""
     return ui.element("div").classes(f"grid {clases} w-full")
-
-
-def _logo_svg(tam=40):
-    """Marca ESAM 360°: anillo 360° azul, punto verde electrico y barras de estadistica."""
-    return (
-        f'<svg width="{tam}" height="{tam}" viewBox="0 0 48 48" fill="none" '
-        'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ESAM 360">'
-        '<rect x="1" y="1" width="46" height="46" rx="12.5" fill="#0D1424" stroke="#26324A" stroke-width="1.5"/>'
-        '<path d="M24 7.6a16.4 16.4 0 1 1-12.1 5.1" stroke="#315CFF" stroke-width="4" stroke-linecap="round"/>'
-        '<circle cx="12.1" cy="12.5" r="3.1" fill="#00D68F"/>'
-        '<rect x="17.1" y="25.6" width="4.4" height="9" rx="1.3" fill="#8FA8FF"/>'
-        '<rect x="23" y="19.6" width="4.4" height="15" rx="1.3" fill="#4A6FFF"/>'
-        '<rect x="28.9" y="24.6" width="4.4" height="10" rx="1.3" fill="#315CFF"/>'
-        '</svg>'
-    )
 
 
 def metrica(etiqueta, valor, pie=""):
@@ -1260,9 +1312,9 @@ def es_admin_estricto(usuario) -> bool:
 # =========================================================
 def _vista_acceso():
     with ui.column().classes("login-wrap items-center gap-2"):
-        ui.html(f"""
+        ui.html("""
             <div style="text-align:center;">
-                <div class="login-crest">{_logo_svg(96)}</div>
+                <div class="login-brand-icon">ESAM</div>
                 <div class="login-name">ESAM ANALYTICS <span>360°</span></div>
                 <div class="login-sub">CENTRO DE CONTROL · ESTADÍSTICAS Y OPERACIONES</div>
                 <div class="login-line"></div>
@@ -1394,11 +1446,9 @@ def _objetivo(usuario, estado):
 
 def _dibujar_drawer(usuario, estado, refrescar):
     with ui.column().classes("w-full gap-1"):
-        with ui.row().classes("items-center gap-2"):
-            ui.html(_logo_svg(36)).classes("brand-mark")
-            ui.html('<div class="app-brand" style="font-size:.9rem">ESAM ANALYTICS <em>360°</em></div>'
-                    '<div class="brand-tag">360° Stats Pro</div>')
-        ui.html(f'<span class="header-user" style="margin-top:.45rem">👤 {usuario["nombre"]}</span>')
+        ui.label("💻 ESAM Analytics").classes("app-brand")
+        ui.label("360° Stats Pro").classes("etiqueta")
+        ui.label(f"👤 {usuario['nombre']}").classes("aviso").style("margin-top:.35rem")
         ui.element("div").classes("separador")
 
         for clave, texto in MENUS:
@@ -1491,21 +1541,18 @@ def _vista_app(usuario):
     estado.setdefault("analista", 0)
     estado.setdefault("modo_admin", True)
 
-    drawer = ui.left_drawer(value=True).classes("app-drawer").style("width:300px")
-
     with ui.header().classes("app-header"):
-        with ui.element("div").classes("w-full flex items-center justify-between gap-2"):
-            with ui.row().classes("items-center gap-2 no-wrap"):
-                ui.button(icon="menu", on_click=drawer.toggle).props("flat round dense").classes("drawer-toggle")
-                ui.html(_logo_svg(38)).classes("brand-mark")
-                ui.html('<div class="app-brand">ESAM ANALYTICS <em>360°</em></div>'
-                        '<div class="brand-tag">Centro de control</div>')
-            with ui.row().classes("items-center gap-2 no-wrap"):
-                ui.html('<span class="live-pill"><span class="live-dot"></span>EN&nbsp;VIVO</span>')
-                ui.html(f'<span class="header-user" title="{usuario["nombre"]}">👤 {usuario["nombre"]}</span>')
+        with ui.element("div").classes("w-full flex items-center justify-between gap-3"):
+            with ui.column().classes("gap-0"):
+                ui.label("ESAM ANALYTICS 360°").classes("app-brand")
+                ui.label("Centro de control · estadísticas y operaciones").classes("etiqueta")
+            with ui.row().classes("items-center gap-3 no-wrap"):
+                ui.label(f"👤 {usuario['nombre']}").classes("aviso")
                 ui.button("Salir", icon="logout", on_click=_cerrar_sesion).props(
-                    "flat no-caps dense"
+                    "flat no-caps"
                 ).classes("btn-suave")
+
+    drawer = ui.left_drawer(value=True).classes("app-drawer").style("width:300px")
     contenido = ui.column().classes("w-full gap-3")
 
     def refrescar():
@@ -1531,20 +1578,20 @@ def _grafico_pastel(total_basket, total_beisbol):
         "tooltip": {
             "trigger": "item",
             "formatter": "{b}: ${c} ({d}%)",
-            "backgroundColor": "#10151E",
-            "borderColor": "#2A3441",
-            "textStyle": {"color": "#FFFFFF"},
+            "backgroundColor": "#111C2E",
+            "borderColor": "#22324D",
+            "textStyle": {"color": "#E7EFFA"},
         },
-        "legend": {"bottom": 0, "textStyle": {"color": "#94A3B8"}},
+        "legend": {"bottom": 0, "textStyle": {"color": "#AFC0D8"}},
         "series": [{
             "name": "Ingresos",
             "type": "pie",
             "radius": ["44%", "70%"],
-            "itemStyle": {"borderColor": "#10151E", "borderWidth": 2},
-            "label": {"color": "#CBD5E1", "formatter": "{b}\n${c}"},
+            "itemStyle": {"borderColor": "#101A2B", "borderWidth": 2},
+            "label": {"color": "#D3DEEC", "formatter": "{b}\n${c}"},
             "data": [
-                {"value": round(float(total_basket), 2), "name": "Básquetbol", "itemStyle": {"color": "#315CFF"}},
-                {"value": round(float(total_beisbol), 2), "name": "Béisbol", "itemStyle": {"color": "#94A3B8"}},
+                {"value": round(float(total_basket), 2), "name": "Básquetbol", "itemStyle": {"color": "#4F8CFF"}},
+                {"value": round(float(total_beisbol), 2), "name": "Béisbol", "itemStyle": {"color": "#12B886"}},
             ],
         }],
     }).classes("w-full").style("height: 330px")
@@ -1553,7 +1600,7 @@ def _grafico_pastel(total_basket, total_beisbol):
 def _grafico_evolucion(df_serie):
     fechas = [pd.to_datetime(i).strftime("%d/%m") for i in df_serie.index]
     series = []
-    for columna, color in (("🏀 Básquetbol ($)", "#315CFF"), ("⚾ Béisbol ($)", "#94A3B8")):
+    for columna, color in (("🏀 Básquetbol ($)", "#4F8CFF"), ("⚾ Béisbol ($)", "#12B886")):
         if columna in df_serie.columns:
             series.append({
                 "name": columna,
@@ -1565,22 +1612,22 @@ def _grafico_evolucion(df_serie):
     ui.echart({
         "tooltip": {
             "trigger": "axis",
-            "backgroundColor": "#10151E",
-            "borderColor": "#2A3441",
-            "textStyle": {"color": "#FFFFFF"},
+            "backgroundColor": "#111C2E",
+            "borderColor": "#22324D",
+            "textStyle": {"color": "#E7EFFA"},
         },
-        "legend": {"top": 0, "textStyle": {"color": "#94A3B8"}},
+        "legend": {"top": 0, "textStyle": {"color": "#AFC0D8"}},
         "grid": {"left": 54, "right": 18, "top": 44, "bottom": 34},
         "xAxis": {
             "type": "category",
             "data": fechas,
-            "axisLabel": {"color": "#94A3B8"},
-            "axisLine": {"lineStyle": {"color": "#2A3441"}},
+            "axisLabel": {"color": "#8FA1BC"},
+            "axisLine": {"lineStyle": {"color": "#22324D"}},
         },
         "yAxis": {
             "type": "value",
-            "axisLabel": {"color": "#94A3B8", "formatter": "${value}"},
-            "splitLine": {"lineStyle": {"color": "#1E293B"}},
+            "axisLabel": {"color": "#8FA1BC", "formatter": "${value}"},
+            "splitLine": {"lineStyle": {"color": "#1E2E47"}},
         },
         "series": series,
     }).classes("w-full").style("height: 330px")
@@ -1943,19 +1990,11 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
             cur = None
             try:
                 cur = conn.cursor()
-                if codigo_partido_ya_existe(cur, codigo):
-                    conn.rollback()
-                    aviso("Este código de partido ya está registrado por un usuario.")
-                    return
                 cur.execute("""
                     INSERT INTO partidos (usuario_id, codigo_partido, fecha, tiempo_ejecucion, tarifa, tipo_partido)
                     VALUES (%s, %s, %s, %s, %s, %s);
                 """, (usuario["id"], codigo, fecha_p, tiempo_guardar, tarifa, tipo))
                 conn.commit()
-            except psycopg2.errors.UniqueViolation:
-                conn.rollback()
-                aviso("Este código de partido ya está registrado por un usuario.")
-                return
             except Exception as e:
                 conn.rollback()
                 error(f"No se pudo guardar el partido: {e}")
@@ -1968,8 +2007,8 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
                     pass
                 cerrar_conexion(conn)
 
-            if tipo == "quincenal":
-                recalcular_tarifas_quincena_basket(usuario["id"], fecha_p)
+            # Los partidos en vivo también suman al tramo, así que se recalcula siempre.
+            recalcular_tarifas_quincena_basket(usuario["id"], fecha_p)
             estado["b_modalidad"] = seleccion
             ok("✅ Partido guardado exitosamente.")
             refrescar()
@@ -2078,14 +2117,11 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
                         return
                     fila = fila.iloc[0]
                     propietario = int(fila["usuario_id"])
+                    fecha_original = fecha_desde_iso(iso_fecha(fila["fecha"]))
                     fecha_edit = fecha_desde_iso(f_e.value)
-                    codigo_edit = (c_e.value or "").strip()
                     tiempo_edit_val = (t_e.value or "").strip()
                     segundos_edit = parsear_tiempo_a_segundos(tiempo_edit_val) if tiempo_edit_val else None
 
-                    if not codigo_edit:
-                        aviso("Ingrese el código del partido.")
-                        return
                     if not fecha_edit:
                         aviso("Seleccione una fecha válida.")
                         return
@@ -2101,31 +2137,23 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
                     cur = None
                     try:
                         cur = conn.cursor()
-                        if codigo_partido_ya_existe(cur, codigo_edit, sel.value):
-                            conn.rollback()
-                            aviso("Este código de partido ya está registrado por un usuario.")
-                            return
                         if es_admin_estricto(usuario):
                             cur.execute("""
                                 UPDATE partidos
                                 SET fecha = %s, codigo_partido = %s, tiempo_ejecucion = %s, tarifa = %s
                                 WHERE id = %s AND usuario_id = %s;
-                            """, (fecha_edit, codigo_edit, tiempo_edit,
+                            """, (fecha_edit, (c_e.value or "").strip(), tiempo_edit,
                                   float(tar_e.value or 0), sel.value, propietario))
                         else:
                             cur.execute("""
                                 UPDATE partidos
                                 SET fecha = %s, codigo_partido = %s, tiempo_ejecucion = %s
                                 WHERE id = %s AND usuario_id = %s;
-                            """, (fecha_edit, codigo_edit, tiempo_edit,
+                            """, (fecha_edit, (c_e.value or "").strip(), tiempo_edit,
                                   sel.value, propietario))
                         if cur.rowcount != 1:
                             raise PermissionError("No tienes permiso para modificar este registro.")
                         conn.commit()
-                    except psycopg2.errors.UniqueViolation:
-                        conn.rollback()
-                        aviso("Este código de partido ya está registrado por un usuario.")
-                        return
                     except Exception as e:
                         conn.rollback()
                         error(f"No se pudo modificar el partido: {e}")
@@ -2139,6 +2167,8 @@ def _vista_basket(usuario, estado, refrescar, f_ini, f_fin, target_id, etiqueta)
                         cerrar_conexion(conn)
 
                     recalcular_tarifas_quincena_basket(propietario, fecha_edit)
+                    if fecha_original and fecha_original != fecha_edit:
+                        recalcular_tarifas_quincena_basket(propietario, fecha_original)
                     ok("✅ Partido modificado y quincena recalculada.")
                     refrescar()
 
@@ -2613,7 +2643,7 @@ def _vista_seguridad(usuario, estado, refrescar):
 @ui.page("/", title="ESAM Analytics 360°")
 def pagina_principal():
     ui.dark_mode(True)  # la interfaz es oscura por diseño, no depende del tema del sistema
-    ui.add_head_html('<meta name="theme-color" content="#090D14">')
+    ui.add_head_html('<meta name="theme-color" content="#070C16">')
     ui.add_head_html(f"<style>{ESTILOS}</style>")
     usuario = app.storage.user.get("usuario")
     if not usuario:
@@ -2627,6 +2657,7 @@ async def _arranque():
     ESTADO_DB["ok"] = init_db()
     if ESTADO_DB["ok"]:
         print("[ESAM] Base de datos conectada y tablas listas.")
+        migrar_tarifas_conteo_en_vivo()
     else:
         print("[ESAM] SIN base de datos: el inicio de sesión no funcionará hasta configurarla.")
 
