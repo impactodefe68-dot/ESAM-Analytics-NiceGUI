@@ -1541,8 +1541,11 @@ def _vista_app(usuario):
     estado.setdefault("analista", 0)
     estado.setdefault("modo_admin", True)
 
+    drawer = ui.left_drawer(value=True).classes("app-drawer").style("width:300px")
+
     with ui.header().classes("app-header"):
         with ui.element("div").classes("w-full flex items-center justify-between gap-3"):
+            ui.button(icon="menu", on_click=drawer.toggle).props("flat round").classes("btn-suave").tooltip("Abrir o cerrar menú de módulos")
             with ui.column().classes("gap-0"):
                 ui.label("ESAM ANALYTICS 360°").classes("app-brand")
                 ui.label("Centro de control · estadísticas y operaciones").classes("etiqueta")
@@ -1552,7 +1555,6 @@ def _vista_app(usuario):
                     "flat no-caps"
                 ).classes("btn-suave")
 
-    drawer = ui.left_drawer(value=True).classes("app-drawer").style("width:300px")
     contenido = ui.column().classes("w-full gap-3")
 
     def refrescar():
